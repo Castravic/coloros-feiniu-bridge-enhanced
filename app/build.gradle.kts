@@ -3,6 +3,8 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val xposedCompileApiVersion = "82"
+
 android {
     namespace = "io.github.colorosfeiniu.bridge"
     compileSdk = 35
@@ -26,5 +28,7 @@ kotlin {
 }
 
 dependencies {
-    compileOnly("de.robv.android.xposed:api:82")
+    // The legacy Xposed bridge API is still compiled against api:82; LSPosed runtime
+    // compatibility is declared separately through xposedminversion=101 in AndroidManifest.xml.
+    compileOnly("de.robv.android.xposed:api:$xposedCompileApiVersion")
 }

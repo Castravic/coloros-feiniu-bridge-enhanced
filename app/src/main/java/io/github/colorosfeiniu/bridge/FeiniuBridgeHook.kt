@@ -28,70 +28,121 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
             if (param.hasThrowable()) return
             if (!param.result.isNullOrBlankString()) return
 
-            val prefix = PrefixResolver.resolve(lpparam)
-            if (prefix.isNullOrBlank()) {
+            val resolved = PrefixResolver.resolve(lpparam)
+            if (resolved == null) {
                 log("prefix fallback unavailable")
                 return
             }
 
-            param.result = prefix
-            log("prefix fallback supplied len=${prefix.length}")
+            param.result = resolved.value
+            if (shouldLogFallback()) {
+                log("prefix fallback supplied source=${resolved.source} len=${resolved.value.length}")
+            }
+        }
+
+        private fun shouldLogFallback(): Boolean {
+            return !fallbackLogged && synchronized(PrefixFallbackHook::class.java) {
+                if (fallbackLogged) {
+                    false
+                } else {
+                    fallbackLogged = true
+                    true
+                }
+            }
+        }
+
+        companion object {
+            @Volatile
+            private var fallbackLogged = false
         }
     }
 
     private object PrefixResolver {
         @Volatile
-        private var cachedPrefix: String? = null
+        private var cachedPrefix: ResolvedPrefix? = null
 
-        fun resolve(lpparam: XC_LoadPackage.LoadPackageParam): String? {
+        fun resolve(lpparam: XC_LoadPackage.LoadPackageParam): ResolvedPrefix? {
             cachedPrefix?.let { return it }
 
             val resolved = findFromApkStrings(lpparam)
-                ?: KNOWN_PREFIX
+                ?: ResolvedPrefix(KNOWN_PREFIX, "builtin")
 
             cachedPrefix = resolved
             return resolved
         }
 
-        private fun findFromApkStrings(lpparam: XC_LoadPackage.LoadPackageParam): String? {
+        private fun findFromApkStrings(lpparam: XC_LoadPackage.LoadPackageParam): ResolvedPrefix? {
             val sourcePaths = buildList {
                 add(lpparam.appInfo?.sourceDir)
                 lpparam.appInfo?.splitSourceDirs?.let(::addAll)
             }.filterNotNull()
 
+            if (sourcePaths.isEmpty()) {
+                log("apk scan skipped: no source paths")
+                return null
+            }
+
             for (sourcePath in sourcePaths) {
                 val prefix = findFromZip(File(sourcePath))
-                if (!prefix.isNullOrBlank()) return prefix
+                if (!prefix.isNullOrBlank()) return ResolvedPrefix(prefix, "apk-dex")
             }
             return null
         }
 
         private fun findFromZip(apk: File): String? {
-            if (!apk.isFile) return null
-            return runCatching {
-                ZipFile(apk).use { zip ->
-                    val entries = zip.entries()
-                    while (entries.hasMoreElements()) {
-                        val entry = entries.nextElement()
-                        if (!entry.name.endsWith(".dex")) continue
-                        val bytes = zip.getInputStream(entry).use { it.readBytes() }
-                        findFromDexStrings(bytes)?.let { return@use it }
+            if (!apk.isFile) {
+                log("apk scan skipped: missing ${apk.path}")
+                return null
+            }
+
+            return try {
+                ZipFile(apk).use { zipFile ->
+                    val dexEntries = zipFile.entries().asSequence()
+                        .filter { it.name.endsWith(".dex") }
+                        .toList()
+
+                    if (dexEntries.isEmpty()) {
+                        log("apk scan skipped: no dex entries in ${apk.name}")
+                        return null
                     }
-                    null
+
+                    for (entry in dexEntries) {
+                        val bytes = zipFile.getInputStream(entry).use { it.readBytes() }
+                        val prefix = findFromDexStrings(bytes, entry.name)
+                        if (!prefix.isNullOrBlank()) return prefix
+                    }
                 }
-            }.getOrNull()
+                log("apk scan did not find Feiniu prefix in ${apk.name}")
+                null
+            } catch (error: Throwable) {
+                log("apk scan failed for ${apk.name}: ${error.javaClass.simpleName}: ${error.message}")
+                null
+            }
         }
 
-        private fun findFromDexStrings(dex: ByteArray): String? {
-            if (dex.size < DEX_HEADER_SIZE || !dex.startsWithDexMagic()) return null
+        private fun findFromDexStrings(dex: ByteArray, entryName: String): String? {
+            if (dex.size < DEX_HEADER_SIZE) {
+                log("dex scan skipped: $entryName is too small")
+                return null
+            }
+            if (!dex.startsWithDexMagic()) {
+                log("dex scan skipped: $entryName is not standard dex")
+                return null
+            }
 
             val stringIdsSize = dex.readUIntLe(DEX_STRING_IDS_SIZE_OFFSET)
             val stringIdsOffset = dex.readUIntLe(DEX_STRING_IDS_OFFSET_OFFSET)
-            if (stringIdsSize <= 0 || stringIdsOffset <= 0) return null
+            if (stringIdsSize <= 0 || stringIdsOffset <= 0) {
+                log("dex scan skipped: $entryName has invalid string table")
+                return null
+            }
 
             for (index in 0 until stringIdsSize) {
                 val stringIdOffset = stringIdsOffset + index * DEX_STRING_ID_SIZE
-                if (stringIdOffset + DEX_STRING_ID_SIZE > dex.size) return null
+                if (stringIdOffset + DEX_STRING_ID_SIZE > dex.size) {
+                    log("dex scan stopped: $entryName string id table out of bounds")
+                    return null
+                }
 
                 val stringDataOffset = dex.readUIntLe(stringIdOffset)
                 val stringValue = dex.readDexString(stringDataOffset) ?: continue
@@ -135,7 +186,13 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
         private fun String.isFeiniuPrefix(): Boolean {
             return length in 16..80 && PREFIX_REGEX.matches(this)
         }
+
     }
+
+    private data class ResolvedPrefix(
+        val value: String,
+        val source: String,
+    )
 
     companion object {
         private const val TARGET_PACKAGE = "com.coloros.gallery3d"

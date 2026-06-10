@@ -47,6 +47,7 @@ LSPosed/Xposed 要求：
 - 最低声明 API：`101`
 - 推荐作用域：`com.coloros.gallery3d`
 - 作用域元数据同时放在 `assets/scope.list` 和 `META-INF/xposed/scope.list`。
+- 模块仍使用 legacy Xposed Bridge 入口编译，编译依赖为 `de.robv.android.xposed:api:82`；运行时兼容性由 `xposedminversion=101` 声明。
 
 已在 ColorOS 16 / Android 16 的相册版本上验证。附近版本理论上也可用，但需要保持以下点不变：
 
