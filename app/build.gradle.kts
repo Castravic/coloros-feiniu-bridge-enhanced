@@ -13,8 +13,8 @@ android {
         applicationId = "io.github.colorosfeiniu.bridge"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.1.1"
     }
 
     compileOptions {
@@ -28,7 +28,6 @@ kotlin {
 }
 
 dependencies {
-    // The legacy Xposed bridge API is still compiled against api:82; LSPosed runtime
-    // compatibility is declared separately through xposedminversion=101 in AndroidManifest.xml.
+    // Pure legacy Xposed Bridge module. Do not add libxposed entry points here.
     compileOnly("de.robv.android.xposed:api:$xposedCompileApiVersion")
 }

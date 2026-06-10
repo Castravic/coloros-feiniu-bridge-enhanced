@@ -14,6 +14,6 @@
             android:value="Restores ColorOS Gallery Feiniu NAS token prefix loading when cryptoeng denies cmd 26." />
         <meta-data
             android:name="xposedminversion"
-            android:value="101" />
+            android:value="82" />
     </application>
 </manifest>

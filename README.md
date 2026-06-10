@@ -9,8 +9,8 @@
 - 优先保留系统原始 `cryptoeng` 路径，只有原方法返回空字符串或 `null` 时才提供 fallback。
 - fallback 会优先解析当前安装的相册 APK dex 字符串池，自动提取包含 `GwToken` 的精确 prefix。
 - 如果 APK 扫描失败，会使用当前已验证的飞牛 token prefix 作为兜底。
-- 声明 LSPosed/Xposed 最低 API 为 `101`。
-- 模块内置作用域推荐，LSPosed 应自动推荐 `相册 / com.coloros.gallery3d`。
+- 这是纯 legacy Xposed Bridge 模块，不使用 libxposed API。
+- 模块内置 legacy 作用域推荐，LSPosed 应自动推荐 `相册 / com.coloros.gallery3d`。
 
 ## 实现原理
 
@@ -44,10 +44,12 @@ SHA-256(prefix + deviceId)
 
 LSPosed/Xposed 要求：
 
-- 最低声明 API：`101`
+- 最低声明 API：`82`
 - 推荐作用域：`com.coloros.gallery3d`
-- 作用域元数据同时放在 `assets/scope.list` 和 `META-INF/xposed/scope.list`。
-- 模块仍使用 legacy Xposed Bridge 入口编译，编译依赖为 `de.robv.android.xposed:api:82`；运行时兼容性由 `xposedminversion=101` 声明。
+- 入口：`assets/xposed_init`
+- 作用域推荐：`assets/scope.list`
+- 不包含 `META-INF/xposed/java_init.list`，不声明 libxposed 入口。
+- 编译依赖：`de.robv.android.xposed:api:82`
 
 已在 ColorOS 16 / Android 16 的相册版本上验证。附近版本理论上也可用，但需要保持以下点不变：
 
