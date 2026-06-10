@@ -9,6 +9,7 @@ LSPosed module for restoring Feiniu NAS access in ColorOS Gallery when Gallery c
 - Keeps the original `cryptoeng` path first. The module only supplies a fallback when the original method returns blank or null.
 - Discovers the prefix from the installed Gallery APK dex strings when possible.
 - Falls back to the currently verified Feiniu token prefix if the APK scan cannot find one.
+- Declares LSPosed/Xposed minimum API `101` and recommends the Gallery scope automatically.
 
 ## How It Works
 
@@ -33,6 +34,12 @@ The module does not fabricate tokens or connection objects. It only restores the
 - Does not decrypt tokens outside the Gallery process.
 
 ## Compatibility
+
+LSPosed/Xposed requirement:
+
+- Minimum declared API: `101`
+- Recommended scope: `com.coloros.gallery3d`
+- Scope metadata is included in both `assets/scope.list` and `META-INF/xposed/scope.list`.
 
 Verified environment:
 
@@ -80,7 +87,7 @@ Sign it with your own key before distribution.
 
 1. Install the signed APK.
 2. Enable it in LSPosed.
-3. Scope it only to `相册` / `com.coloros.gallery3d`.
+3. LSPosed should recommend `相册` / `com.coloros.gallery3d` automatically. Keep only that scope enabled.
 4. Force stop Gallery or reboot.
 5. Open Gallery and enter the Feiniu NAS/private cloud entry.
 
