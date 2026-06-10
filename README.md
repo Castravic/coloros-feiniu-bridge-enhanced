@@ -48,14 +48,7 @@ LSPosed/Xposed 要求：
 - 推荐作用域：`com.coloros.gallery3d`
 - 作用域元数据同时放在 `assets/scope.list` 和 `META-INF/xposed/scope.list`。
 
-已验证环境：
-
-- 设备：OnePlus PLK110
-- 系统：ColorOS V16.1.0 / Android 16
-- 相册：`com.coloros.gallery3d` `16.35.10`
-- 飞牛 NAS 服务端口：`:5667`
-
-附近版本理论上也可用，但需要保持以下点不变：
+已在 ColorOS 16 / Android 16 的相册版本上验证。附近版本理论上也可用，但需要保持以下点不变：
 
 - 目标包名：`com.coloros.gallery3d`
 - token 解密类：`com.oplus.aiunit.vision.erq`
