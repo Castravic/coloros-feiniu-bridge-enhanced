@@ -16,8 +16,6 @@
   - 温度降至 41°C 或以下恢复。
 - 首页下拉区域显示飞牛私有云备份暂停的具体原因。
 - 在相册设置中增加“允许私有云备份使用移动数据”选项。
-- 移动数据开关切换后立即重新计算备份条件，无需重启相册。
-- 移动数据支持只放宽网络类型限制，温度、电量、省电模式、存储空间和官方云同步占用等条件仍然生效。
 
 ## 安装
 
@@ -97,7 +95,7 @@ app/build/outputs/apk/debug/app-debug.apk
 app/build/outputs/apk/release/app-release-unsigned.apk
 ```
 
-GitHub Actions 默认只构建测试 APK 和未签名 Release APK。正式发布时，应在可信的本地环境使用固定证书签名，再上传到 GitHub Release；不要把签名文件提交到仓库。
+GitHub Actions 会自动构建测试 APK。正式版本请从 [Releases](../../releases) 下载。
 
 ## 排查日志
 
