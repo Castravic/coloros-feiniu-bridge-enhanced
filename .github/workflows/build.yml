@@ -32,11 +32,11 @@ jobs:
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: coloros-feiniu-bridge-debug
+          name: coloros-feiniu-bridge-enhanced-debug
           path: app/build/outputs/apk/debug/*.apk
 
       - name: Upload release APK
         uses: actions/upload-artifact@v4
         with:
-          name: coloros-feiniu-bridge-release-unsigned
+          name: coloros-feiniu-bridge-enhanced-release-unsigned
           path: app/build/outputs/apk/release/*.apk

@@ -1,131 +1,125 @@
-# ColorOS 飞牛 Bridge
+# ColorOS 飞牛 Bridge Enhanced
 
-这是一个 LSPosed 模块，用于修复部分 ColorOS 相册无法连接飞牛 NAS 的问题。问题根因是相册在本地加载 token 解密 prefix 时调用 `cryptoeng cmd 26`，但系统底层拒绝了 `com.coloros.gallery3d` 进程，导致 prefix 为空、token 解密失败、NAS 连接流程无法继续。
+面向 ColorOS 16 相册的 LSPosed 增强模块，修复 Root 后飞牛私有云无法连接、自动备份异常等问题。
+
+本项目 Fork 自 [Costben/coloros-feiniu-bridge](https://github.com/Costben/coloros-feiniu-bridge)，保留原项目完整提交历史与 MIT 许可证。在原有连接修复基础上，增加了自动备份温控兼容、暂停原因展示和移动数据备份支持。
+
+> 当前主要验证环境：ColorOS 16 / Android 16，相册 `16.35.10`。相册内部类名经过混淆，其他版本可能需要重新适配。
 
 ## 功能
 
-- 只作用于 `com.coloros.gallery3d`。
-- Hook 相册内的 `com.oplus.aiunit.vision.erq.e()`，也就是相册侧 prefix 加载方法。
-- 优先保留系统原始 `cryptoeng` 路径，只有原方法返回空字符串或 `null` 时才提供 fallback。
-- fallback 会优先解析当前安装的相册 APK dex 字符串池，自动提取包含 `GwToken` 的精确 prefix。
-- 如果 APK 扫描失败，会使用当前已验证的飞牛 token prefix 作为兜底。
-- 这是纯 legacy Xposed Bridge 模块，不使用 libxposed API。
-- 模块内置 legacy 作用域推荐，LSPosed 应自动推荐 `相册 / com.coloros.gallery3d`。
-
-## 实现原理
-
-ColorOS 相册会通过已保存的 access token 和 refresh token 构造飞牛 NAS 的 `ConnectionSetupData`。token 解密使用 AES-GCM，密钥派生方式是：
-
-```text
-SHA-256(prefix + deviceId)
-```
-
-受影响的系统版本中，相册会通过 `cryptoeng cmd 26` 获取 `prefix`。但 `cryptoeng` 根据调用进程做权限检查，拒绝了相册进程，导致 `prefix` 为 `null`。随后 token 解密返回 `null`，相册也就不会继续建立 NAS 连接。
-
-本模块只在原始 prefix 加载方法执行之后检查结果：
-
-- 如果原方法已经成功返回 prefix，模块不做任何修改。
-- 如果原方法返回空或 `null`，模块从相册 APK 的 dex 字符串池中解析飞牛 prefix 并返回给相册。
-- 相册随后继续执行它自己的 token 解密和 NAS 连接流程。
-
-模块不会伪造 token，不会伪造连接对象，也不会跳过飞牛服务端认证。它只恢复相册原有链路缺失的本地 prefix 值。
-
-## 不做什么
-
-- 不修改相册 APK。
-- 不修改 MyDevices。
-- 不修改数据库。
-- 不修改账号绑定或 NAS 设备记录。
-- 不绕过飞牛服务端认证。
-- 不打印、不保存、不上传 token。
-- 不在相册进程外解密 token。
-
-## 兼容性
-
-LSPosed/Xposed 要求：
-
-- 最低声明 API：`82`
-- 推荐作用域：`com.coloros.gallery3d`
-- 入口：`assets/xposed_init`
-- 作用域推荐：`assets/scope.list`
-- 不包含 `META-INF/xposed/java_init.list`，不声明 libxposed 入口。
-- 编译依赖：`de.robv.android.xposed:api:82`
-
-已在 ColorOS 16 / Android 16 的相册版本上验证。附近版本理论上也可用，但需要保持以下点不变：
-
-- 目标包名：`com.coloros.gallery3d`
-- token 解密类：`com.oplus.aiunit.vision.erq`
-- prefix 加载方法：`e()`
-- token 密钥派生方式：`SHA-256(prefix + deviceId)`
-
-如果 OPPO/OnePlus 后续改了混淆类名、方法名或 token 派生方式，模块需要跟进适配。
-
-## 构建
-
-GitHub Actions 会在每次 push、pull request 和手动触发时自动构建 APK，并上传 debug/release unsigned APK artifact。
-
-也可以用 Android Studio 打开本仓库，然后运行 `app` 构建任务。
-
-本地有 Gradle 时可以执行：
-
-```bash
-gradle :app:assembleRelease
-```
-
-如果发布前需要仓库内置 Gradle Wrapper，可以在有 Gradle 的机器上执行一次：
-
-```bash
-gradle wrapper --gradle-version 8.7
-```
-
-构建产物位置：
-
-```text
-app/build/outputs/apk/release/app-release-unsigned.apk
-```
-
-release APK 需要自行签名后再分发。
+- 修复相册调用 `cryptoeng cmd 26` 失败后，飞牛 token prefix 为空而无法连接的问题。
+- 保留相册原始 token、账号和服务端认证流程，不伪造连接状态。
+- 使用与 ColorOS 官方云备份一致的温控策略：
+  - 前台温度高于 45°C 暂停。
+  - 后台温度高于 43°C 暂停。
+  - 温度降至 41°C 或以下恢复。
+- 首页下拉区域显示飞牛私有云备份暂停的具体原因。
+- 在相册设置中增加“允许私有云备份使用移动数据”选项。
+- 移动数据开关切换后立即重新计算备份条件，无需重启相册。
+- 移动数据支持只放宽网络类型限制，温度、电量、省电模式、存储空间和官方云同步占用等条件仍然生效。
 
 ## 安装
 
-1. 安装已签名 APK，或者安装 GitHub Actions 生成的 debug APK。
-2. 在 LSPosed 中启用模块。
-3. LSPosed 应自动推荐 `相册 / com.coloros.gallery3d` 作用域，只保留这个作用域即可。
-4. 强停相册或重启手机。
-5. 打开相册，进入飞牛 NAS / 私有云入口。
+1. 从 [Releases](../../releases) 下载已签名 APK。
+2. 安装模块并在 LSPosed 中启用。
+3. 作用域只选择 `相册 / com.coloros.gallery3d`。
+4. 强行停止相册或重启手机。
+5. 打开相册并进入私有云页面。
 
-## 预期日志
+升级时请直接覆盖安装。不同签名的 APK 无法互相覆盖，本 Fork 的 Release 会持续使用同一签名。
 
-LSPosed 日志中应能看到：
+## 暂停原因
+
+模块会根据相册内部的 `PauseReason` 显示对应说明，包括：
+
+- 飞牛私有云未连接
+- 私有云存储空间不足
+- 相册网络权限未开启
+- 没有可用网络
+- 设备温度较高
+- 电量不足
+- 省电模式已开启
+- 官方云服务正在同步
+- 私有云正在批量下载
+- 其他应用正在前台运行
+
+中文环境使用模块内置中文映射，避免相册资源异常回退为英文。
+
+## 移动数据备份
+
+设置路径：
 
 ```text
-ColorOSFeiniuBridge: installed for com.coloros.gallery3d
-ColorOSFeiniuBridge: prefix fallback supplied len=33
+相册 → 设置 → 允许私有云备份使用移动数据
 ```
 
-随后相册会继续原有连接流程，并连接飞牛 NAS 服务。
+该选项默认关闭。开启后，仅当 ColorOS 网络监视器确认当前移动网络已经通过联网验证时，私有云自动备份才会放行。
 
-## 排查
+## 实现概览
 
-- 没有 `ColorOSFeiniuBridge` 日志：模块没有被 LSPosed 加载，检查模块是否启用、作用域是否包含 `com.coloros.gallery3d`、是否重启或强停相册。
-- `install failed: ClassNotFoundException`：相册混淆类名变了，需要重新定位 token 解密类。
-- 没有 `prefix fallback supplied`：原始 `cryptoeng` 可能已经成功，或者没有触发飞牛入口。
-- fallback 后仍无法连接：检查相册日志里是否有 `AEADBadTagException`、token 过期、NAS 不可达、账号绑定异常等问题。
-- token 解密成功但相册为空：本模块只恢复连接构造，照片索引和同步状态由相册与飞牛 NAS 自身处理。
+模块只作用于 `com.coloros.gallery3d`，主要适配点如下：
 
-常用排查命令：
+- `com.oplus.aiunit.vision.erq.e()`：token prefix fallback。
+- `com.oplus.aiunit.vision.bsf`：NAS 自动备份条件与温控判断。
+- `com.oplus.aiunit.vision.stf`：首页备份状态和暂停原因。
+- `com.oplus.aiunit.vision.jsf`：备份条件即时重算。
+- `NetworkMonitor`：在私有云备份条件检查范围内接受已验证的移动网络。
+- `SettingsActivity.SettingFragment`：注入移动数据备份开关。
+
+这些类名来自相册 `16.35.10`，后续版本可能变化。
+
+## 安全边界
+
+本模块：
+
+- 不修改相册 APK。
+- 不修改账号绑定、NAS 设备记录或数据库。
+- 不伪造、不打印、不上传 token。
+- 不跳过飞牛服务端认证。
+- 不改变官方云服务的网络策略。
+- 不绕过温度、电量、省电模式等安全条件。
+
+仅应用于用户自己拥有并已绑定的飞牛 NAS。
+
+## 构建
+
+需要 JDK 17、Android SDK 35 和 Gradle 8.7：
 
 ```bash
-adb shell logcat | grep -iE 'ColorOSFeiniuBridge|FeiniuNasSDK|TokenDecryptor|NasAlbum|cryptoeng'
-adb shell su -c 'ss -tnp | grep 5667'
+gradle :app:assembleDebug :app:assembleRelease
 ```
 
-## 安全说明
+输出位置：
 
-本模块仅用于用户访问自己拥有并已绑定的飞牛 NAS。模块恢复的是相册本地 prefix 加载失败的问题，不改变 token 来源、不改变服务端校验、不改变账号或设备绑定。
+```text
+app/build/outputs/apk/debug/app-debug.apk
+app/build/outputs/apk/release/app-release-unsigned.apk
+```
 
-请不要将本模块用于访问你不拥有或无权访问的设备、账号或 NAS 服务。
+GitHub Actions 默认只构建测试 APK 和未签名 Release APK。正式发布时，应在可信的本地环境使用固定证书签名，再上传到 GitHub Release；不要把签名文件提交到仓库。
+
+## 排查日志
+
+```bash
+adb shell logcat | grep -iE 'ColorOSFeiniuBridge|FeiniuNasSDK|NasBackup'
+```
+
+常见模块日志：
+
+```text
+ColorOSFeiniuBridge: prefix fallback installed
+ColorOSFeiniuBridge: backup pause reason text installed
+ColorOSFeiniuBridge: mobile data backup compatibility installed
+ColorOSFeiniuBridge: mobile data backup condition refresh requested
+ColorOSFeiniuBridge: validated mobile network accepted for NAS backup
+```
+
+## 致谢
+
+- 原项目及连接修复实现：[Costben/coloros-feiniu-bridge](https://github.com/Costben/coloros-feiniu-bridge)
+- 测试、逆向分析与增强功能由本 Fork 持续维护。
 
 ## 许可证
 
-MIT
+[MIT](LICENSE)

@@ -4,14 +4,14 @@
         android:extractNativeLibs="false"
         android:hasCode="true"
         android:icon="@drawable/ic_launcher"
-        android:label="ColorOS Feiniu Bridge"
+        android:label="ColorOS 飞牛 Bridge Enhanced"
         android:supportsRtl="true">
         <meta-data
             android:name="xposedmodule"
             android:value="true" />
         <meta-data
             android:name="xposeddescription"
-            android:value="Restores ColorOS Gallery Feiniu NAS token prefix loading when cryptoeng denies cmd 26." />
+            android:value="修复并增强 ColorOS 相册的飞牛私有云连接与自动备份功能。" />
         <meta-data
             android:name="xposedminversion"
             android:value="82" />
