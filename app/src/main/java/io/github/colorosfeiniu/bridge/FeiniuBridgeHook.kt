@@ -30,9 +30,24 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
 
     private fun installPrefixFallback(lpparam: XC_LoadPackage.LoadPackageParam) {
         runCatching {
-            val tokenDecryptor = XposedHelpers.findClass(TOKEN_DECRYPTOR_CLASS, lpparam.classLoader)
-            XposedBridge.hookAllMethods(tokenDecryptor, PREFIX_METHOD, PrefixFallbackHook(lpparam))
-            log("prefix fallback installed")
+            val methods = loadExistingClasses(lpparam.classLoader, TOKEN_DECRYPTOR_CLASSES)
+                .flatMap { candidate ->
+                    candidate.type.declaredMethods.filter { method ->
+                        method.name == PREFIX_METHOD &&
+                            method.returnType == String::class.java &&
+                            method.parameterTypes.isEmpty()
+                    }
+                }
+            methods.forEach { method ->
+                method.isAccessible = true
+                XposedBridge.hookMethod(method, PrefixFallbackHook(lpparam))
+            }
+
+            if (methods.isEmpty()) {
+                log("prefix fallback unavailable")
+            } else {
+                log("prefix fallback installed")
+            }
         }.onFailure { error ->
             log("prefix fallback install failed: ${error.javaClass.simpleName}: ${error.message}")
         }
@@ -40,21 +55,20 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
 
     private fun installBackupPauseDiagnostics(lpparam: XC_LoadPackage.LoadPackageParam) {
         runCatching {
-            val conditionChecker = XposedHelpers.findClass(
-                BACKUP_CONDITION_CHECKER_CLASS,
-                lpparam.classLoader,
-            )
             val pauseReason = XposedHelpers.findClass(
                 BACKUP_PAUSE_REASON_CLASS,
                 lpparam.classLoader,
             )
-            val methods = conditionChecker.declaredMethods.filter { method ->
-                method.name == BACKUP_CONDITION_METHOD &&
-                    method.returnType == pauseReason &&
-                    method.parameterTypes.contentEquals(
-                        arrayOf(Boolean::class.javaPrimitiveType, Boolean::class.javaPrimitiveType),
-                    )
-            }
+            val methods = loadExistingClasses(lpparam.classLoader, BACKUP_CONDITION_CHECKER_CLASSES)
+                .flatMap { candidate ->
+                    candidate.type.declaredMethods.filter { method ->
+                        method.name == BACKUP_CONDITION_METHOD &&
+                            method.returnType == pauseReason &&
+                            method.parameterTypes.contentEquals(
+                                arrayOf(Boolean::class.javaPrimitiveType, Boolean::class.javaPrimitiveType),
+                            )
+                    }
+                }
             methods.forEach { method ->
                 method.isAccessible = true
                 XposedBridge.hookMethod(method, BackupPauseReasonHook)
@@ -72,36 +86,32 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
 
     private fun installBackupTemperatureCompatibility(lpparam: XC_LoadPackage.LoadPackageParam) {
         runCatching {
-            val conditionChecker = XposedHelpers.findClass(
-                BACKUP_CONDITION_CHECKER_CLASS,
-                lpparam.classLoader,
-            )
             val pauseReason = XposedHelpers.findClass(
                 BACKUP_PAUSE_REASON_CLASS,
                 lpparam.classLoader,
             )
-            val temperatureUtil = XposedHelpers.findClass(
-                TEMPERATURE_UTIL_CLASS,
-                lpparam.classLoader,
-            )
-            val activityLifecycle = XposedHelpers.findClass(
-                ACTIVITY_LIFECYCLE_CLASS,
-                lpparam.classLoader,
-            )
-            CloudBackupTemperaturePolicy.activityLifecycleClass = activityLifecycle
+            CloudBackupTemperaturePolicy.activityLifecycleClass = runCatching {
+                XposedHelpers.findClass(ACTIVITY_LIFECYCLE_CLASS, lpparam.classLoader)
+            }.getOrNull()
 
-            val conditionMethods = conditionChecker.declaredMethods.filter { method ->
-                method.name == RAW_BACKUP_CONDITION_METHOD &&
-                    method.returnType == pauseReason &&
-                    method.parameterTypes.contentEquals(
-                        arrayOf(Boolean::class.javaPrimitiveType, Boolean::class.javaPrimitiveType),
-                    )
-            }
-            val temperatureMethods = temperatureUtil.declaredMethods.filter { method ->
-                method.name == TEMPERATURE_METHOD &&
-                    method.returnType == Float::class.javaPrimitiveType &&
-                    method.parameterTypes.isEmpty()
-            }
+            val conditionMethods = loadExistingClasses(lpparam.classLoader, BACKUP_CONDITION_CHECKER_CLASSES)
+                .flatMap { candidate ->
+                    candidate.type.declaredMethods.filter { method ->
+                        method.name == RAW_BACKUP_CONDITION_METHOD &&
+                            method.returnType == pauseReason &&
+                            method.parameterTypes.contentEquals(
+                                arrayOf(Boolean::class.javaPrimitiveType, Boolean::class.javaPrimitiveType),
+                            )
+                    }
+                }
+            val temperatureMethods = loadExistingClasses(lpparam.classLoader, TEMPERATURE_UTIL_CLASSES)
+                .flatMap { candidate ->
+                    candidate.type.declaredMethods.filter { method ->
+                        method.name == TEMPERATURE_METHOD &&
+                            method.returnType == Float::class.javaPrimitiveType &&
+                            method.parameterTypes.isEmpty()
+                    }
+                }
 
             conditionMethods.forEach { method ->
                 method.isAccessible = true
@@ -129,12 +139,14 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
 
     private fun installBackupPauseReasonText(lpparam: XC_LoadPackage.LoadPackageParam) {
         runCatching {
-            val stateInfoClass = XposedHelpers.findClass(NAS_BACKUP_STATE_INFO_CLASS, lpparam.classLoader)
-            val methods = stateInfoClass.declaredMethods.filter { method ->
-                !Modifier.isStatic(method.modifiers) &&
-                    method.returnType == String::class.java &&
-                    method.parameterTypes.contentEquals(arrayOf(Context::class.java))
-            }
+            val methods = loadExistingClasses(lpparam.classLoader, NAS_BACKUP_STATE_INFO_CLASSES)
+                .flatMap { candidate ->
+                    candidate.type.declaredMethods.filter { method ->
+                        !Modifier.isStatic(method.modifiers) &&
+                            method.returnType == String::class.java &&
+                            method.parameterTypes.contentEquals(arrayOf(Context::class.java))
+                    }
+                }
             methods.forEach { method ->
                 method.isAccessible = true
                 XposedBridge.hookMethod(method, BackupPauseReasonTextHook)
@@ -154,22 +166,23 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
         runCatching {
             val networkMonitor = XposedHelpers.findClass(NETWORK_MONITOR_CLASS, lpparam.classLoader)
             MobileDataBackupPolicy.networkMonitorClass = networkMonitor
-            val conditionObserver = XposedHelpers.findClass(
-                NAS_BACKUP_CONDITION_OBSERVER_CLASS,
+            val conditionObserverHooks = loadExistingClasses(
                 lpparam.classLoader,
-            )
-            MobileDataBackupPolicy.conditionRefreshMethod =
-                conditionObserver.declaredMethods.firstOrNull { method ->
+                NAS_BACKUP_CONDITION_OBSERVER_CLASSES,
+            ).mapNotNull { candidate ->
+                val refreshMethod = candidate.type.declaredMethods.firstOrNull { method ->
                     !Modifier.isStatic(method.modifiers) &&
                         method.returnType == Void.TYPE &&
                         method.parameterTypes.contentEquals(
                             arrayOf(Boolean::class.javaPrimitiveType),
                         )
-                }?.apply { isAccessible = true }
-            XposedBridge.hookAllConstructors(
-                conditionObserver,
-                RememberConditionObserverHook,
-            )
+                }?.apply { isAccessible = true } ?: return@mapNotNull null
+                XposedBridge.hookAllConstructors(
+                    candidate.type,
+                    RememberConditionObserverHook(refreshMethod),
+                )
+                candidate
+            }
 
             val wlanMethods = networkMonitor.declaredMethods.filter { method ->
                 Modifier.isStatic(method.modifiers) &&
@@ -182,18 +195,22 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
                 XposedBridge.hookMethod(method, AllowValidatedMobileNetworkHook)
             }
 
-            val stateInfoClass = XposedHelpers.findClass(NAS_BACKUP_STATE_INFO_CLASS, lpparam.classLoader)
-            val notificationConditionMethods = stateInfoClass.declaredMethods.filter { method ->
-                Modifier.isStatic(method.modifiers) &&
-                    method.name == NAS_NOTIFICATION_CONDITION_METHOD &&
-                    method.parameterTypes.contentEquals(arrayOf(Boolean::class.javaPrimitiveType))
+            val notificationConditionMethods = loadExistingClasses(
+                lpparam.classLoader,
+                NAS_NOTIFICATION_CONDITION_CLASSES,
+            ).flatMap { candidate ->
+                candidate.type.declaredMethods.filter { method ->
+                    Modifier.isStatic(method.modifiers) &&
+                        method.name == NAS_NOTIFICATION_CONDITION_METHOD &&
+                        method.parameterTypes.contentEquals(arrayOf(Boolean::class.javaPrimitiveType))
+                }
             }
             notificationConditionMethods.forEach { method ->
                 method.isAccessible = true
                 XposedBridge.hookMethod(method, MobileNetworkEvaluationScopeHook)
             }
 
-            if (wlanMethods.isEmpty() || notificationConditionMethods.isEmpty()) {
+            if (wlanMethods.isEmpty() || notificationConditionMethods.isEmpty() || conditionObserverHooks.isEmpty()) {
                 log("mobile data backup compatibility partially unavailable")
             } else {
                 log("mobile data backup compatibility installed")
@@ -240,12 +257,14 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
         override fun beforeHookedMethod(param: MethodHookParam) {
             backupConditionEvaluationDepth.set((backupConditionEvaluationDepth.get() ?: 0) + 1)
             mobileNetworkEvaluationDepth.set((mobileNetworkEvaluationDepth.get() ?: 0) + 1)
+            backupConditionForeground.set(param.args.getOrNull(1) as? Boolean)
         }
 
         override fun afterHookedMethod(param: MethodHookParam) {
             val remaining = (backupConditionEvaluationDepth.get() ?: 0) - 1
             if (remaining <= 0) {
                 backupConditionEvaluationDepth.remove()
+                backupConditionForeground.remove()
             } else {
                 backupConditionEvaluationDepth.set(remaining)
             }
@@ -275,9 +294,11 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
         }
     }
 
-    private object RememberConditionObserverHook : XC_MethodHook() {
+    private class RememberConditionObserverHook(
+        private val refreshMethod: Method,
+    ) : XC_MethodHook() {
         override fun afterHookedMethod(param: MethodHookParam) {
-            MobileDataBackupPolicy.rememberConditionObserver(param.thisObject)
+            MobileDataBackupPolicy.rememberConditionObserver(param.thisObject, refreshMethod)
         }
     }
 
@@ -309,7 +330,7 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
         private var lastLoggedState: String? = null
 
         fun evaluate(actualTemperature: Float): TemperatureDecision {
-            val foreground = runCatching {
+            val foreground = backupConditionForeground.get() ?: runCatching {
                 XposedHelpers.callStaticMethod(
                     activityLifecycleClass,
                     ACTIVITY_FOREGROUND_METHOD,
@@ -378,11 +399,9 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
             val backupState = runCatching {
                 XposedHelpers.getObjectField(param.thisObject, NAS_BACKUP_STATE_FIELD)
             }.getOrNull() ?: return
-            if (backupState.javaClass.name != NAS_PAUSED_STATE_CLASS) return
+            if (backupState.javaClass.name !in NAS_PAUSED_STATE_CLASSES) return
 
-            val reason = runCatching {
-                XposedHelpers.getObjectField(backupState, PAUSE_REASON_FIELD)?.toString()
-            }.getOrNull() ?: return
+            val reason = findPauseReason(backupState) ?: return
             val text = resolvePauseReasonText(context, reason) ?: return
             param.result = text
         }
@@ -471,13 +490,13 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
         var networkMonitorClass: Class<*>? = null
 
         @Volatile
-        var conditionRefreshMethod: Method? = null
-
-        @Volatile
         private var context: Context? = null
 
         @Volatile
         private var conditionObserver = WeakReference<Any>(null)
+
+        @Volatile
+        private var conditionRefreshMethod: Method? = null
 
         @Volatile
         private var useLogged = false
@@ -505,8 +524,9 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
             log("mobile data backup preference changed enabled=$enabled")
         }
 
-        fun rememberConditionObserver(value: Any) {
+        fun rememberConditionObserver(value: Any, refreshMethod: Method) {
             conditionObserver = WeakReference(value)
+            conditionRefreshMethod = refreshMethod
         }
 
         fun requestConditionRefresh() {
@@ -720,25 +740,47 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
 
     companion object {
         private const val TARGET_PACKAGE = "com.coloros.gallery3d"
-        private const val TOKEN_DECRYPTOR_CLASS = "com.oplus.aiunit.vision.erq"
         private const val PREFIX_METHOD = "e"
-        private const val BACKUP_CONDITION_CHECKER_CLASS = "com.oplus.aiunit.vision.bsf"
+        private val TOKEN_DECRYPTOR_CLASSES = arrayOf(
+            "com.oplus.aiunit.vision.erq",
+            "com.oplus.aiunit.vision.in80",
+        )
         private const val BACKUP_PAUSE_REASON_CLASS =
             "com.oplus.gallery.framework.abilities.cloudsync.nas.backup.state.PauseReason"
         private const val BACKUP_CONDITION_METHOD = "b"
         private const val RAW_BACKUP_CONDITION_METHOD = "a"
-        private const val NAS_BACKUP_STATE_INFO_CLASS = "com.oplus.aiunit.vision.stf"
+        private val BACKUP_CONDITION_CHECKER_CLASSES = arrayOf(
+            "com.oplus.aiunit.vision.bsf",
+            "com.oplus.aiunit.vision.f0q",
+        )
+        private val NAS_BACKUP_STATE_INFO_CLASSES = arrayOf(
+            "com.oplus.aiunit.vision.stf",
+            "com.oplus.aiunit.vision.o3q",
+        )
         private const val NAS_BACKUP_STATE_FIELD = "g"
-        private const val NAS_PAUSED_STATE_CLASS = "com.oplus.aiunit.vision.otf\$h"
+        private val NAS_PAUSED_STATE_CLASSES = setOf(
+            "com.oplus.aiunit.vision.otf\$h",
+            "com.oplus.aiunit.vision.k3q\$h",
+        )
         private const val PAUSE_REASON_FIELD = "a"
         private const val NAS_NOTIFICATION_CONDITION_METHOD = "d"
-        private const val TEMPERATURE_UTIL_CLASS = "com.oplus.aiunit.vision.vwp"
+        private val NAS_NOTIFICATION_CONDITION_CLASSES = arrayOf(
+            "com.oplus.aiunit.vision.stf",
+            "com.oplus.aiunit.vision.o3q\$a",
+        )
+        private val TEMPERATURE_UTIL_CLASSES = arrayOf(
+            "com.oplus.aiunit.vision.vwp",
+            "com.oplus.aiunit.vision.l370",
+        )
         private const val TEMPERATURE_METHOD = "a"
         private const val ACTIVITY_LIFECYCLE_CLASS = "com.oplus.aiunit.vision.c50"
         private const val ACTIVITY_FOREGROUND_METHOD = "b"
         private const val NETWORK_MONITOR_CLASS =
             "com.oplus.gallery.standard_lib.util.network.NetworkMonitor"
-        private const val NAS_BACKUP_CONDITION_OBSERVER_CLASS = "com.oplus.aiunit.vision.jsf"
+        private val NAS_BACKUP_CONDITION_OBSERVER_CLASSES = arrayOf(
+            "com.oplus.aiunit.vision.jsf",
+            "com.oplus.aiunit.vision.k2q",
+        )
         private const val WLAN_VALIDATED_METHOD = "e"
         private const val MOBILE_VALIDATED_METHOD = "c"
         private const val SETTINGS_FRAGMENT_CLASS =
@@ -763,7 +805,24 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
         private const val DEX_STRING_ID_SIZE = 4
         private val PREFIX_REGEX = Regex("""[A-Za-z][A-Za-z0-9@#_!*&$%+?.-]{7,79}GwToken[A-Za-z0-9@#_!*&$%+?.-]{4,80}""")
         private val backupConditionEvaluationDepth = ThreadLocal.withInitial { 0 }
+        private val backupConditionForeground = ThreadLocal<Boolean?>()
         private val mobileNetworkEvaluationDepth = ThreadLocal.withInitial { 0 }
+
+        private data class ClassCandidate(
+            val name: String,
+            val type: Class<*>,
+        )
+
+        private fun loadExistingClasses(
+            classLoader: ClassLoader,
+            classNames: Array<String>,
+        ): List<ClassCandidate> {
+            return classNames.mapNotNull { className ->
+                runCatching {
+                    ClassCandidate(className, XposedHelpers.findClass(className, classLoader))
+                }.getOrNull()
+            }
+        }
 
         private fun Any?.isNullOrBlankString(): Boolean {
             return (this as? String).isNullOrBlank()
@@ -782,6 +841,21 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
             return runCatching {
                 val activityThread = XposedHelpers.findClass("android.app.ActivityThread", null)
                 XposedHelpers.callStaticMethod(activityThread, "currentApplication") as? Context
+            }.getOrNull()
+        }
+
+        private fun findPauseReason(backupState: Any): String? {
+            val reasonField = backupState.javaClass.declaredFields.firstOrNull { field ->
+                !Modifier.isStatic(field.modifiers) && field.type.name == BACKUP_PAUSE_REASON_CLASS
+            }
+            if (reasonField != null) {
+                return runCatching {
+                    reasonField.isAccessible = true
+                    reasonField.get(backupState)?.toString()
+                }.getOrNull()
+            }
+            return runCatching {
+                XposedHelpers.getObjectField(backupState, PAUSE_REASON_FIELD)?.toString()
             }.getOrNull()
         }
 

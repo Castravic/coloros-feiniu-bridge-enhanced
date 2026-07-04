@@ -1,4 +1,6 @@
 .gradle/
+.kotlin/
+/outputs/
 /build/
 /app/build/
 *.iml
