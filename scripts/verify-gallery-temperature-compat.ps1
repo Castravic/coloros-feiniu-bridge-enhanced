@@ -37,13 +37,13 @@ function Get-FileContent {
     return Get-Content -Raw -LiteralPath $Path
 }
 
-function Get-JavaMethodBody {
+function Get-BracedBody {
     param(
         [Parameter(Mandatory = $true)][string]$Content,
-        [Parameter(Mandatory = $true)][string]$SignaturePattern,
+        [Parameter(Mandatory = $true)][string]$StartPattern,
         [Parameter(Mandatory = $true)][string]$Message
     )
-    $match = [regex]::Match($Content, $SignaturePattern)
+    $match = [regex]::Match($Content, $StartPattern)
     Assert-Condition $match.Success $Message
 
     $openBrace = $Content.IndexOf('{', $match.Index + $match.Length)
@@ -61,6 +61,15 @@ function Get-JavaMethodBody {
         }
     }
     throw $Message
+}
+
+function Get-JavaMethodBody {
+    param(
+        [Parameter(Mandatory = $true)][string]$Content,
+        [Parameter(Mandatory = $true)][string]$SignaturePattern,
+        [Parameter(Mandatory = $true)][string]$Message
+    )
+    return Get-BracedBody -Content $Content -StartPattern $SignaturePattern -Message $Message
 }
 
 function Get-KotlinArrayBody {
@@ -95,9 +104,13 @@ Assert-Condition -Condition ($conditionCandidates -match '"com\.oplus\.aiunit\.v
 Assert-Condition -Condition ($temperatureCandidates -match '"com\.oplus\.aiunit\.vision\.r570"') -Message 'Hook does not cover Gallery 16.40.13 temperature utility r570 in TEMPERATURE_UTIL_CLASSES'
 
 Assert-Condition -Condition ($hookContent -notmatch '\blastForeground\b') -Message 'Temperature hysteresis still contains lastForeground, so app state changes can incorrectly clear a high-temperature pause'
-$blockedResetCount = [regex]::Matches($hookContent, '(?m)^\s*blocked\s*=\s*false').Count
-Assert-Condition -Condition ($blockedResetCount -eq 1) -Message 'Temperature hysteresis must have exactly one blocked = false runtime reset'
-$retryReset = [regex]::IsMatch($hookContent, '(?s)actualTemperature\s*<=\s*CLOUD_RETRY_TEMPERATURE_C\s*->\s*\{\s*blocked\s*=\s*false')
-Assert-Condition -Condition $retryReset -Message 'Temperature hysteresis must reset blocked only in the actualTemperature <= CLOUD_RETRY_TEMPERATURE_C branch'
+$policyBody = Get-BracedBody -Content $hookContent -StartPattern 'private\s+object\s+CloudBackupTemperaturePolicy\s*' -Message 'Hook has no CloudBackupTemperaturePolicy object'
+$evaluateBody = Get-BracedBody -Content $policyBody -StartPattern 'fun\s+evaluate\s*\(\s*actualTemperature\s*:\s*Float\s*\)\s*:\s*TemperatureDecision\s*' -Message 'CloudBackupTemperaturePolicy has no evaluate(actualTemperature: Float): TemperatureDecision method'
+$retryBranchBody = Get-BracedBody -Content $evaluateBody -StartPattern 'actualTemperature\s*<=\s*CLOUD_RETRY_TEMPERATURE_C\s*->\s*' -Message 'Temperature hysteresis has no actualTemperature <= CLOUD_RETRY_TEMPERATURE_C reset branch'
+$blockedResetPattern = '(?<![\p{L}\p{N}_$.])(?:this\s*\.\s*)?blocked\s*=\s*false\b'
+$evaluateResetCount = [regex]::Matches($evaluateBody, $blockedResetPattern).Count
+$retryBranchResetCount = [regex]::Matches($retryBranchBody, $blockedResetPattern).Count
+Assert-Condition -Condition ($evaluateResetCount -eq 1) -Message 'CloudBackupTemperaturePolicy.evaluate must have exactly one blocked = false runtime reset'
+Assert-Condition -Condition ($retryBranchResetCount -eq 1) -Message 'The unique blocked = false reset must be fully inside the actualTemperature <= CLOUD_RETRY_TEMPERATURE_C branch'
 
 Write-Host 'Gallery 16.40.13 temperature compatibility and hysteresis verified.'
