@@ -347,7 +347,6 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
         var activityLifecycleClass: Class<*>? = null
 
         private var blocked = false
-        private var lastForeground: Boolean? = null
         private var lastLoggedState: String? = null
 
         fun evaluate(actualTemperature: Float): TemperatureDecision {
@@ -364,11 +363,6 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
             }
 
             synchronized(this) {
-                if (lastForeground != foreground) {
-                    blocked = false
-                    lastForeground = foreground
-                }
-
                 val allow = when {
                     actualTemperature <= CLOUD_RETRY_TEMPERATURE_C -> {
                         blocked = false
