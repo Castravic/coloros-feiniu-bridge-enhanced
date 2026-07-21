@@ -4,12 +4,13 @@
 
 本项目 Fork 自 [Costben/coloros-feiniu-bridge](https://github.com/Costben/coloros-feiniu-bridge)，保留原项目完整提交历史与 MIT 许可证。在原有连接修复基础上，增加了自动备份温控兼容、暂停原因展示和移动数据备份支持。
 
-> 当前主要验证环境：ColorOS 16 / Android 16，相册 `16.35.10`。相册内部类名经过混淆，其他版本可能需要重新适配。
+> 当前适配环境：ColorOS 16 / Android 16，相册 `16.35.10`、`16.40.8`、`16.40.13`。相册内部类名经过混淆，其他版本可能需要重新适配。
 
 ## 功能
 
 - 修复相册调用 `cryptoeng cmd 26` 失败后，飞牛 token prefix 为空而无法连接的问题。
 - 保留相册原始 token、账号和服务端认证流程，不伪造连接状态。
+- 在飞牛相册统计接口不可用时，恢复私有云相册列表和云端照片浏览。
 - 使用与 ColorOS 官方云备份一致的温控策略：
   - 前台温度高于 45°C 暂停。
   - 后台温度高于 43°C 暂停。
@@ -58,14 +59,16 @@
 
 模块只作用于 `com.coloros.gallery3d`，主要适配点如下：
 
-- `com.oplus.aiunit.vision.erq.e()`：token prefix fallback。
-- `com.oplus.aiunit.vision.bsf`：NAS 自动备份条件与温控判断。
+- 相册 token 解密器：提供 token prefix fallback。
+- 相册统计服务：接口不可用时从真实相册数据恢复私有云列表。
+- `bsf / f0q / u0q`：NAS 自动备份条件判断。
+- `vwp / l370 / r570`：仅在 NAS 备份条件检查范围内应用温控策略。
 - `com.oplus.aiunit.vision.stf`：首页备份状态和暂停原因。
 - `com.oplus.aiunit.vision.jsf`：备份条件即时重算。
 - `NetworkMonitor`：在私有云备份条件检查范围内接受已验证的移动网络。
 - `SettingsActivity.SettingFragment`：注入移动数据备份开关。
 
-这些类名来自相册 `16.35.10`，后续版本可能变化。
+这些候选覆盖相册 `16.35.10`、`16.40.8` 和 `16.40.13`，后续版本仍可能因混淆变化而需要适配。
 
 ## 安全边界
 
