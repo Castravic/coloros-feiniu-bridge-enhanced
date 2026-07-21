@@ -21,6 +21,7 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
         log("loading for ${lpparam.packageName}/${lpparam.processName}")
 
         installPrefixFallback(lpparam)
+        GalleryStatFallback.install(lpparam.classLoader)
         installBackupPauseDiagnostics(lpparam)
         installBackupTemperatureCompatibility(lpparam)
         installBackupPauseReasonText(lpparam)
@@ -30,7 +31,8 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
 
     private fun installPrefixFallback(lpparam: XC_LoadPackage.LoadPackageParam) {
         runCatching {
-            val methods = loadExistingClasses(lpparam.classLoader, TOKEN_DECRYPTOR_CLASSES)
+            val decryptorClasses = loadExistingClasses(lpparam.classLoader, TOKEN_DECRYPTOR_CLASSES)
+            val methods = decryptorClasses
                 .flatMap { candidate ->
                     candidate.type.declaredMethods.filter { method ->
                         method.name == PREFIX_METHOD &&
@@ -47,6 +49,25 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
                 log("prefix fallback unavailable")
             } else {
                 log("prefix fallback installed")
+            }
+
+            val decryptMethods = decryptorClasses.flatMap { candidate ->
+                candidate.type.declaredMethods.filter { method ->
+                    method.name == TOKEN_DECRYPT_METHOD &&
+                        method.returnType == String::class.java &&
+                        method.parameterTypes.contentEquals(
+                            arrayOf(String::class.java, String::class.java),
+                        )
+                }
+            }
+            decryptMethods.forEach { method ->
+                method.isAccessible = true
+                XposedBridge.hookMethod(method, TokenDecryptionDiagnosticHook)
+            }
+            if (decryptMethods.isEmpty()) {
+                log("token decryption diagnostics unavailable")
+            } else {
+                log("token decryption diagnostics installed methods=${decryptMethods.size}")
             }
         }.onFailure { error ->
             log("prefix fallback install failed: ${error.javaClass.simpleName}: ${error.message}")
@@ -601,6 +622,33 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
         }
     }
 
+    private object TokenDecryptionDiagnosticHook : XC_MethodHook() {
+        override fun afterHookedMethod(param: MethodHookParam) {
+            val event = if (param.hasThrowable()) {
+                "token decrypt result=error type=${param.throwable.javaClass.simpleName}"
+            } else {
+                val value = param.result as? String
+                if (value.isNullOrBlank()) {
+                    "token decrypt result=empty"
+                } else {
+                    "token decrypt result=success len=${value.length}"
+                }
+            }
+
+            val eventNumber = synchronized(this) {
+                if (loggedEventCount >= MAX_TOKEN_DECRYPT_DIAGNOSTIC_EVENTS) return
+                loggedEventCount += 1
+                loggedEventCount
+            }
+            log(
+                "$event class=${param.method.declaringClass.name} " +
+                    "event=$eventNumber/$MAX_TOKEN_DECRYPT_DIAGNOSTIC_EVENTS",
+            )
+        }
+
+        private var loggedEventCount = 0
+    }
+
     private object PrefixResolver {
         @Volatile
         private var cachedPrefix: ResolvedPrefix? = null
@@ -741,9 +789,12 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
     companion object {
         private const val TARGET_PACKAGE = "com.coloros.gallery3d"
         private const val PREFIX_METHOD = "e"
+        private const val TOKEN_DECRYPT_METHOD = "b"
+        private const val MAX_TOKEN_DECRYPT_DIAGNOSTIC_EVENTS = 20
         private val TOKEN_DECRYPTOR_CLASSES = arrayOf(
             "com.oplus.aiunit.vision.erq",
             "com.oplus.aiunit.vision.in80",
+            "com.oplus.aiunit.vision.op80",
         )
         private const val BACKUP_PAUSE_REASON_CLASS =
             "com.oplus.gallery.framework.abilities.cloudsync.nas.backup.state.PauseReason"

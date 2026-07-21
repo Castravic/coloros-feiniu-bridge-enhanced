@@ -39,6 +39,7 @@ $requiredPatterns = @(
     'if \(message\.startsWith\(STAT_TIMEOUT_PREFIX\)\) return false',
     'statlessDevices\.add\(deviceId\)',
     'statlessDevices\.contains\(deviceId\)',
+    'cached\.photos\.toLong\(\) \+ cached\.videos\.toLong\(\) <= 0L',
     'invokeRealAlbums\(param\.thisObject, deviceId, limit, offset\)',
     'gallery stat fallback used source=local-cache photos=',
     'gallery stat fallback cache unavailable; enabling real-albums mode',

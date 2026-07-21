@@ -15,8 +15,8 @@ The same statistic call is also used by the first-screen preload optimization. T
 The module installs a narrowly scoped compatibility hook for the Feiniu provider implementation.
 
 1. After `n1g.J(connectionManager, deviceId)` fails with the known `getGalleryStat` upstream error, query Gallery's existing local `ALL_PROJECT` statistic through `q6q.f(deviceId)`.
-2. If a cached `n9q(photoCount, videoCount)` exists, return that object to the original `n1g.G()` method. Gallery then performs its normal one-item `getGalleryPhotos` cover request, builds the normal virtual `ALL_PROJECT` album, and continues with the original `getAlbumList` pagination.
-3. If no cached statistic exists, do not create a fake `n9q`. Mark that device as statless for the current process and allow the original call to fail.
+2. If a cached `n9q(photoCount, videoCount)` exists and its total is positive, return that object to the original `n1g.G()` method. Gallery then performs its normal one-item `getGalleryPhotos` cover request, builds the normal virtual `ALL_PROJECT` album, and continues with the original `getAlbumList` pagination.
+3. If no cached statistic exists, or its total is zero, do not create or return a misleading `n9q`. Gallery's original `G()` treats a zero total as an empty cloud and skips `getAlbumList`, so mark that device as statless for the current process and allow the original call to fail.
 4. For a statless device, intercept `n1g.l(offset, limit, deviceId)` only when its failure is the same statistic error. Obtain the existing connection through `n1g.H(deviceId, false)` and call `n1g.F(connection, deviceId, limit, offset)` directly. This returns only real Feiniu albums and deliberately omits the virtual `ALL_PROJECT` album.
 5. While a device remains statless, later `n1g.l()` calls use the same direct real-album pagination mapping so offsets do not retain the virtual-album `-1` shift.
 
