@@ -803,6 +803,7 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
         private val BACKUP_CONDITION_CHECKER_CLASSES = arrayOf(
             "com.oplus.aiunit.vision.bsf",
             "com.oplus.aiunit.vision.f0q",
+            "com.oplus.aiunit.vision.u0q",
         )
         private val NAS_BACKUP_STATE_INFO_CLASSES = arrayOf(
             "com.oplus.aiunit.vision.stf",
@@ -822,6 +823,7 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
         private val TEMPERATURE_UTIL_CLASSES = arrayOf(
             "com.oplus.aiunit.vision.vwp",
             "com.oplus.aiunit.vision.l370",
+            "com.oplus.aiunit.vision.r570",
         )
         private const val TEMPERATURE_METHOD = "a"
         private const val ACTIVITY_LIFECYCLE_CLASS = "com.oplus.aiunit.vision.c50"
