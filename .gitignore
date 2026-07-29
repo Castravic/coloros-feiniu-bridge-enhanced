@@ -1,4 +1,6 @@
 .gradle/
+.analysis/
+.worktrees/
 .kotlin/
 /outputs/
 /build/

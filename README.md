@@ -4,11 +4,14 @@
 
 本项目 Fork 自 [Costben/coloros-feiniu-bridge](https://github.com/Costben/coloros-feiniu-bridge)，保留原项目完整提交历史与 MIT 许可证。在原有连接修复基础上，增加了自动备份温控兼容、暂停原因展示和移动数据备份支持。
 
-> 当前适配环境：ColorOS 16 / Android 16，相册 `16.35.10`、`16.40.8`、`16.40.13`。相册内部类名经过混淆，其他版本可能需要重新适配。
+> 当前已验证环境：ColorOS 16 / Android 16，相册 `16.35.10`、`16.40.8`、`16.40.13`、`16.40.22`。后续版本会先尝试语义解析，但仍需真机确认厂商没有改写相关业务流程。
 
 ## 功能
 
 - 修复相册调用 `cryptoeng cmd 26` 失败后，飞牛 token prefix 为空而无法连接的问题。
+- 相册更新导致混淆类名变化时，自动按稳定行为特征定位 token 解密与相册统计入口，并缓存解析结果。
+- 适配相册 `16.40.22` 的 `qp80` token 解密器和备份状态相关混淆类。
+- 修复相册 `16.40.22` 通过 RFC1918 私网 IPv4 访问飞牛 NAS 时的 TLS 分支不兼容。
 - 保留相册原始 token、账号和服务端认证流程，不伪造连接状态。
 - 在飞牛相册统计接口不可用时，恢复私有云相册列表和云端照片浏览。
 - 使用与 ColorOS 官方云备份一致的温控策略：
@@ -59,16 +62,21 @@
 
 模块只作用于 `com.coloros.gallery3d`，主要适配点如下：
 
-- 相册 token 解密器：提供 token prefix fallback。
+- `erq / in80 / op80 / qp80`：已验证版本直接使用固定映射，为 token 解密器提供 prefix fallback。
+- 未知类名：仅对 token 解密器和相册统计服务启用 DexKit 语义解析；候选必须唯一且通过完整反射签名校验。
+- 解析缓存：按相册版本、更新时间和 base/split APK 元数据生成指纹；相册更新后自动失效并重新解析。
 - 相册统计服务：接口不可用时从真实相册数据恢复私有云列表。
+- `ktc0.k(String)`：仅将 RFC1918 私网 IPv4 导向相册自带的兼容 TLS 分支。
 - `bsf / f0q / u0q`：NAS 自动备份条件判断。
-- `vwp / l370 / r570`：仅在 NAS 备份条件检查范围内应用温控策略。
-- `com.oplus.aiunit.vision.stf`：首页备份状态和暂停原因。
+- `vwp / l370 / r570 / t570`：仅在 NAS 备份条件检查范围内应用温控策略。
+- `stf / o3q / d4q`：首页备份状态和暂停原因。
 - `com.oplus.aiunit.vision.jsf`：备份条件即时重算。
 - `NetworkMonitor`：在私有云备份条件检查范围内接受已验证的移动网络。
 - `SettingsActivity.SettingFragment`：注入移动数据备份开关。
 
-这些候选覆盖相册 `16.35.10`、`16.40.8` 和 `16.40.13`，后续版本仍可能因混淆变化而需要适配。
+这些固定候选覆盖相册 `16.35.10`、`16.40.8`、`16.40.13` 和 `16.40.22`。后续版本若只改变混淆名，语义解析通常可自行恢复；如果厂商改写了业务流程或稳定特征，仍需更新模块。
+
+首次遇到未知相册版本时会进行一次 DEX 扫描，启动可能略慢，模块 APK 也会因包含 DexKit 原生库而增大。扫描结果会缓存，之后直接复用。解析出多个候选或校验失败时会关闭对应 Hook，而不是猜测目标。
 
 ## 安全边界
 
@@ -80,6 +88,8 @@
 - 不跳过飞牛服务端认证。
 - 不改变官方云服务的网络策略。
 - 不绕过温度、电量、省电模式等安全条件。
+
+相册 `16.40.22` 的私网 IPv4 兼容会复用相册内置的宽松 TLS 分支，该分支不验证服务器证书。放宽仅限 `10/8`、`172.16/12` 和 `192.168/16`，但同一局域网内的恶意主机仍可能冒充 NAS；请只在可信局域网中使用。
 
 仅应用于用户自己拥有并已绑定的飞牛 NAS。
 
@@ -110,6 +120,10 @@ adb shell logcat | grep -iE 'ColorOSFeiniuBridge|FeiniuNasSDK|NasBackup'
 
 ```text
 ColorOSFeiniuBridge: prefix fallback installed
+ColorOSFeiniuBridge: token resolver source=known class=com.oplus.aiunit.vision.qp80
+ColorOSFeiniuBridge: semantic-scan tokenCandidates=1 galleryCandidates=1 elapsedMs=...
+ColorOSFeiniuBridge: private LAN TLS compatibility installed
+ColorOSFeiniuBridge: private LAN TLS compatibility activated
 ColorOSFeiniuBridge: backup pause reason text installed
 ColorOSFeiniuBridge: mobile data backup compatibility installed
 ColorOSFeiniuBridge: mobile data backup condition refresh requested

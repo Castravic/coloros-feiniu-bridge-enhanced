@@ -2,109 +2,23 @@ package io.github.colorosfeiniu.bridge
 
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
+import io.github.colorosfeiniu.bridge.resolver.ValidatedGalleryHooks
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
-import java.lang.reflect.Modifier
 import java.util.concurrent.ConcurrentHashMap
 
 internal object GalleryStatFallback {
-    fun install(classLoader: ClassLoader) {
-        val installed = VARIANTS.mapNotNull { variant ->
-            installVariant(classLoader, variant)
-        }
-        if (installed.isEmpty()) {
-            log("gallery stat fallback unavailable")
-        } else {
-            log("gallery stat fallback installed variants=${installed.size}")
-        }
-    }
-
-    private fun installVariant(
-        classLoader: ClassLoader,
-        variant: GalleryVariant,
-    ): InstalledVariant? = runCatching {
-        val providerClass = Class.forName(variant.providerClass, false, classLoader)
-        val cacheClass = Class.forName(variant.cacheClass, false, classLoader)
-        val statClass = Class.forName(variant.statClass, false, classLoader)
-
-        val statMethod = providerClass.declaredMethods.single { method ->
-            Modifier.isStatic(method.modifiers) &&
-                method.name == STAT_METHOD &&
-                method.returnType == statClass &&
-                method.parameterTypes.size == 2 &&
-                method.parameterTypes[1] == String::class.java
-        }.accessible()
-        val albumsMethod = providerClass.declaredMethods.single { method ->
-            !Modifier.isStatic(method.modifiers) &&
-                method.name == ALBUMS_METHOD &&
-                List::class.java.isAssignableFrom(method.returnType) &&
-                method.parameterTypes.contentEquals(
-                    arrayOf(
-                        Int::class.javaPrimitiveType,
-                        Int::class.javaPrimitiveType,
-                        String::class.java,
-                    ),
-                )
-        }.accessible()
-        val connectionMethod = providerClass.declaredMethods.single { method ->
-            !Modifier.isStatic(method.modifiers) &&
-                method.name == CONNECTION_METHOD &&
-                method.returnType != Void.TYPE &&
-                method.parameterTypes.contentEquals(
-                    arrayOf(
-                        String::class.java,
-                        Boolean::class.javaPrimitiveType,
-                    ),
-                )
-        }.accessible()
-        val realAlbumsMethod = providerClass.declaredMethods.single { method ->
-            !Modifier.isStatic(method.modifiers) &&
-                method.name == REAL_ALBUMS_METHOD &&
-                List::class.java.isAssignableFrom(method.returnType) &&
-                method.parameterTypes.contentEquals(
-                    arrayOf(
-                        connectionMethod.returnType,
-                        String::class.java,
-                        Int::class.javaPrimitiveType,
-                        Int::class.javaPrimitiveType,
-                    ),
-                )
-        }.accessible()
-        val cacheMethod = cacheClass.declaredMethods.single { method ->
-            Modifier.isStatic(method.modifiers) &&
-                method.name == CACHE_METHOD &&
-                method.returnType == statClass &&
-                method.parameterTypes.contentEquals(arrayOf(String::class.java))
-        }.accessible()
-        val photoCountField = statClass.getDeclaredField(PHOTO_COUNT_FIELD).apply {
-            isAccessible = true
-        }
-        val videoCountField = statClass.getDeclaredField(VIDEO_COUNT_FIELD).apply {
-            isAccessible = true
-        }
-        require(photoCountField.type == Int::class.javaPrimitiveType)
-        require(videoCountField.type == Int::class.javaPrimitiveType)
-
-        InstalledVariant(
-            cacheMethod = cacheMethod,
-            connectionMethod = connectionMethod,
-            realAlbumsMethod = realAlbumsMethod,
-            photoCount = { value -> photoCountField.getInt(value) },
-            videoCount = { value -> videoCountField.getInt(value) },
-        ).also { installedVariant ->
-            XposedBridge.hookMethod(statMethod, StatHook(installedVariant))
-            XposedBridge.hookMethod(albumsMethod, AlbumsHook(installedVariant))
-        }
-    }.onFailure { error ->
-        if (error !is ClassNotFoundException) {
-            logBounded(
-                "gallery stat fallback failed stage=install type=${error.javaClass.simpleName}",
-            )
-        }
-    }.getOrNull()
-
-    private fun Method.accessible(): Method = apply {
-        isAccessible = true
+    fun install(validated: ValidatedGalleryHooks) {
+        val installed = InstalledVariant(
+            cacheMethod = validated.cache,
+            connectionMethod = validated.connection,
+            realAlbumsMethod = validated.realAlbums,
+            photoCount = { value -> validated.photoCount.getInt(value) },
+            videoCount = { value -> validated.videoCount.getInt(value) },
+        )
+        XposedBridge.hookMethod(validated.stat, StatHook(installed))
+        XposedBridge.hookMethod(validated.albums, AlbumsHook(installed))
+        log("gallery stat fallback installed source=validated")
     }
 
     private class StatHook(
@@ -273,12 +187,6 @@ internal object GalleryStatFallback {
         XposedBridge.log("ColorOSFeiniuBridge: $message")
     }
 
-    private data class GalleryVariant(
-        val providerClass: String,
-        val cacheClass: String,
-        val statClass: String,
-    )
-
     private data class InstalledVariant(
         val cacheMethod: Method,
         val connectionMethod: Method,
@@ -299,13 +207,6 @@ internal object GalleryStatFallback {
         override val cause: Throwable,
     ) : RuntimeException(cause)
 
-    private const val STAT_METHOD = "J"
-    private const val ALBUMS_METHOD = "l"
-    private const val CONNECTION_METHOD = "H"
-    private const val REAL_ALBUMS_METHOD = "F"
-    private const val CACHE_METHOD = "f"
-    private const val PHOTO_COUNT_FIELD = "a"
-    private const val VIDEO_COUNT_FIELD = "b"
     private const val STAT_FAILURE_PREFIX = "getGalleryStat failed for device:"
     private const val STAT_TIMEOUT_PREFIX = "getGalleryStat timeout for device:"
     private const val STAGE_CONNECTION = "connection"
@@ -313,10 +214,6 @@ internal object GalleryStatFallback {
     private const val MAX_CAUSE_DEPTH = 8
     private const val MAX_DIAGNOSTIC_EVENTS = 40
 
-    private val VARIANTS = listOf(
-        GalleryVariant("com.oplus.aiunit.vision.z0g", "com.oplus.aiunit.vision.b6q", "com.oplus.aiunit.vision.y8q"),
-        GalleryVariant("com.oplus.aiunit.vision.n1g", "com.oplus.aiunit.vision.q6q", "com.oplus.aiunit.vision.n9q"),
-    )
     private val logLock = Any()
     private var loggedEvents = 0
 }
