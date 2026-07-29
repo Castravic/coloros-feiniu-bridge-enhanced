@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Verifies that FeiniuBridgeHook keeps hook candidates for both tested Gallery versions.
+Verifies known Gallery mappings and the semantic connection resolver anchors.
 
 .DESCRIPTION
 By default this uses sibling jadx output directories from this workspace:
@@ -15,7 +15,9 @@ param(
     [string]$NewSources,
     [string]$Gallery164022Sources,
     [string]$HookFile,
-    [string]$FallbackFile,
+    [string]$KnownMappingsFile,
+    [string]$SemanticResolverFile,
+    [string]$BuildFile,
     [string]$CurrentDex,
     [string]$Dexdump,
     [switch]$SkipLegacySourceEvidence
@@ -30,8 +32,16 @@ if ([string]::IsNullOrWhiteSpace($HookFile)) {
     $HookFile = Join-Path $repo 'app\src\main\java\io\github\colorosfeiniu\bridge\FeiniuBridgeHook.kt'
 }
 
-if ([string]::IsNullOrWhiteSpace($FallbackFile)) {
-    $FallbackFile = Join-Path $repo 'app\src\main\java\io\github\colorosfeiniu\bridge\GalleryStatFallback.kt'
+if ([string]::IsNullOrWhiteSpace($KnownMappingsFile)) {
+    $KnownMappingsFile = Join-Path $repo 'app\src\main\java\io\github\colorosfeiniu\bridge\resolver\KnownConnectionResolver.kt'
+}
+
+if ([string]::IsNullOrWhiteSpace($SemanticResolverFile)) {
+    $SemanticResolverFile = Join-Path $repo 'app\src\main\java\io\github\colorosfeiniu\bridge\resolver\SemanticDexResolver.kt'
+}
+
+if ([string]::IsNullOrWhiteSpace($BuildFile)) {
+    $BuildFile = Join-Path $repo 'app\build.gradle.kts'
 }
 
 if ([string]::IsNullOrWhiteSpace($OldSources)) {
@@ -141,30 +151,38 @@ if (-not $SkipLegacySourceEvidence) {
 }
 
 Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.bsf' 'Hook source no longer covers old Gallery condition checker bsf'
-Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.erq' 'Hook source no longer covers old Gallery token decryptor erq'
+Assert-FileContains $KnownMappingsFile 'com\.oplus\.aiunit\.vision\.erq' 'Known mappings no longer cover old Gallery token decryptor erq'
 Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.vwp' 'Hook source no longer covers old Gallery temperature util vwp'
 Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.stf' 'Hook source no longer covers old Gallery state info stf'
 Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.otf\\\$h' 'Hook source no longer covers old Gallery paused state otf$h'
 
 Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.f0q' 'Hook source does not cover new Gallery condition checker f0q'
-Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.in80' 'Hook source does not cover new Gallery token decryptor in80'
+Assert-FileContains $KnownMappingsFile 'com\.oplus\.aiunit\.vision\.in80' 'Known mappings do not cover new Gallery token decryptor in80'
 Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.l370' 'Hook source does not cover new Gallery temperature util l370'
 Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.o3q' 'Hook source does not cover new Gallery state info o3q'
 Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.k3q\\\$h' 'Hook source does not cover new Gallery paused state k3q$h'
 
-Assert-FileContains $FallbackFile 'com\.oplus\.aiunit\.vision\.z0g' 'Fallback no longer covers Gallery 16.40.8 Feiniu provider z0g'
-Assert-FileContains $FallbackFile 'com\.oplus\.aiunit\.vision\.b6q' 'Fallback no longer covers Gallery 16.40.8 NAS album cache b6q'
-Assert-FileContains $FallbackFile 'com\.oplus\.aiunit\.vision\.y8q' 'Fallback no longer covers Gallery 16.40.8 statistic DTO y8q'
-Assert-FileContains $FallbackFile 'com\.oplus\.aiunit\.vision\.n1g' 'Fallback no longer covers Gallery 16.40.13 Feiniu provider n1g'
-Assert-FileContains $FallbackFile 'com\.oplus\.aiunit\.vision\.q6q' 'Fallback no longer covers Gallery 16.40.13 NAS album cache q6q'
-Assert-FileContains $FallbackFile 'com\.oplus\.aiunit\.vision\.n9q' 'Fallback no longer covers Gallery 16.40.13 statistic DTO n9q'
+Assert-FileContains $KnownMappingsFile 'com\.oplus\.aiunit\.vision\.z0g' 'Known mappings no longer cover Gallery 16.40.8 Feiniu provider z0g'
+Assert-FileContains $KnownMappingsFile 'com\.oplus\.aiunit\.vision\.b6q' 'Known mappings no longer cover Gallery 16.40.8 NAS album cache b6q'
+Assert-FileContains $KnownMappingsFile 'com\.oplus\.aiunit\.vision\.y8q' 'Known mappings no longer cover Gallery 16.40.8 statistic DTO y8q'
+Assert-FileContains $KnownMappingsFile 'com\.oplus\.aiunit\.vision\.n1g' 'Known mappings no longer cover Gallery 16.40.13 Feiniu provider n1g'
+Assert-FileContains $KnownMappingsFile 'com\.oplus\.aiunit\.vision\.q6q' 'Known mappings no longer cover Gallery 16.40.13 NAS album cache q6q'
+Assert-FileContains $KnownMappingsFile 'com\.oplus\.aiunit\.vision\.n9q' 'Known mappings no longer cover Gallery 16.40.13 statistic DTO n9q'
+
+Assert-FileContains $SemanticResolverFile 'TokenDecryptor' 'Semantic resolver lacks the token decryptor anchor'
+Assert-FileContains $SemanticResolverFile 'AES/GCM/NoPadding' 'Semantic resolver lacks the AES/GCM token anchor'
+Assert-FileContains $SemanticResolverFile 'SHA-256' 'Semantic resolver lacks the token hash-chain anchor'
+Assert-FileContains $SemanticResolverFile 'CryptoEngManager' 'Semantic resolver lacks the hardware crypto-chain anchor'
+Assert-FileContains $SemanticResolverFile 'getGalleryStat failed for device:' 'Semantic resolver lacks the Gallery stat failure anchor'
+Assert-FileContains $SemanticResolverFile 'NasGalleryStatDto\(photoCount=' 'Semantic resolver lacks the Gallery stat DTO anchor'
+Assert-FileContains $BuildFile 'org\.luckypray:dexkit:2\.2\.0' 'DexKit runtime dependency is missing'
 
 if (-not [string]::IsNullOrWhiteSpace($CurrentDex) -or -not [string]::IsNullOrWhiteSpace($Dexdump)) {
     if ([string]::IsNullOrWhiteSpace($CurrentDex) -or [string]::IsNullOrWhiteSpace($Dexdump)) {
         throw 'Pass -CurrentDex and -Dexdump together'
     }
     Assert-CurrentTokenDecryptor -DexPath $CurrentDex -DexdumpPath $Dexdump
-    Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.op80' 'Hook source does not cover Gallery 16.40.13 token decryptor op80'
+    Assert-FileContains $KnownMappingsFile 'com\.oplus\.aiunit\.vision\.op80' 'Known mappings do not cover Gallery 16.40.13 token decryptor op80'
 }
 
 if (-not [string]::IsNullOrWhiteSpace($Gallery164022Sources)) {
@@ -201,7 +219,7 @@ if (-not [string]::IsNullOrWhiteSpace($Gallery164022Sources)) {
     Assert-FileContains $HookFile 'private LAN TLS compatibility installed' 'Hook source lacks the private-LAN TLS installation diagnostic'
     Assert-FileContains $HookFile 'private LAN TLS compatibility activated' 'Hook source lacks the privacy-safe private-LAN TLS activation diagnostic'
 
-    Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.qp80' 'Hook source does not cover Gallery 16.40.22 token decryptor qp80'
+    Assert-FileContains $KnownMappingsFile 'com\.oplus\.aiunit\.vision\.qp80' 'Known mappings do not cover Gallery 16.40.22 token decryptor qp80'
     Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.u0q' 'Hook source does not cover Gallery 16.40.22 condition checker u0q'
     Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.d4q' 'Hook source does not cover Gallery 16.40.22 backup state d4q'
     Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.z3q\\\$h' 'Hook source does not cover Gallery 16.40.22 paused state z3q$h'

@@ -6,6 +6,9 @@ import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
+import io.github.colorosfeiniu.bridge.resolver.ConnectionResolutionBootstrap
+import io.github.colorosfeiniu.bridge.resolver.ResolutionSource
+import io.github.colorosfeiniu.bridge.resolver.ValidatedTokenHooks
 import java.io.File
 import java.lang.ref.WeakReference
 import java.lang.reflect.Method
@@ -20,9 +23,16 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
 
         log("loading for ${lpparam.packageName}/${lpparam.processName}")
 
-        installPrefixFallback(lpparam)
+        ConnectionResolutionBootstrap.install(
+            lpparam = lpparam,
+            tokenInstaller = { hooks, source ->
+                installResolvedTokenHooks(lpparam, hooks, source)
+            },
+            galleryInstaller = { hooks, _ ->
+                GalleryStatFallback.install(hooks)
+            },
+        )
         installPrivateLanTlsCompatibility(lpparam)
-        GalleryStatFallback.install(lpparam.classLoader)
         installBackupPauseDiagnostics(lpparam)
         installBackupTemperatureCompatibility(lpparam)
         installBackupPauseReasonText(lpparam)
@@ -30,49 +40,15 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
         installMobileDataPreference(lpparam)
     }
 
-    private fun installPrefixFallback(lpparam: XC_LoadPackage.LoadPackageParam) {
-        runCatching {
-            val decryptorClasses = loadExistingClasses(lpparam.classLoader, TOKEN_DECRYPTOR_CLASSES)
-            val methods = decryptorClasses
-                .flatMap { candidate ->
-                    candidate.type.declaredMethods.filter { method ->
-                        method.name == PREFIX_METHOD &&
-                            method.returnType == String::class.java &&
-                            method.parameterTypes.isEmpty()
-                    }
-                }
-            methods.forEach { method ->
-                method.isAccessible = true
-                XposedBridge.hookMethod(method, PrefixFallbackHook(lpparam))
-            }
-
-            if (methods.isEmpty()) {
-                log("prefix fallback unavailable")
-            } else {
-                log("prefix fallback installed")
-            }
-
-            val decryptMethods = decryptorClasses.flatMap { candidate ->
-                candidate.type.declaredMethods.filter { method ->
-                    method.name == TOKEN_DECRYPT_METHOD &&
-                        method.returnType == String::class.java &&
-                        method.parameterTypes.contentEquals(
-                            arrayOf(String::class.java, String::class.java),
-                        )
-                }
-            }
-            decryptMethods.forEach { method ->
-                method.isAccessible = true
-                XposedBridge.hookMethod(method, TokenDecryptionDiagnosticHook)
-            }
-            if (decryptMethods.isEmpty()) {
-                log("token decryption diagnostics unavailable")
-            } else {
-                log("token decryption diagnostics installed methods=${decryptMethods.size}")
-            }
-        }.onFailure { error ->
-            log("prefix fallback install failed: ${error.javaClass.simpleName}: ${error.message}")
-        }
+    private fun installResolvedTokenHooks(
+        lpparam: XC_LoadPackage.LoadPackageParam,
+        hooks: ValidatedTokenHooks,
+        source: ResolutionSource,
+    ) {
+        XposedBridge.hookMethod(hooks.prefix, PrefixFallbackHook(lpparam))
+        XposedBridge.hookMethod(hooks.decrypt, TokenDecryptionDiagnosticHook)
+        log("prefix fallback installed source=${source.name.lowercase()}")
+        log("token decryption diagnostics installed methods=1")
     }
 
     private fun installPrivateLanTlsCompatibility(
@@ -855,15 +831,7 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
         private const val TARGET_PACKAGE = "com.coloros.gallery3d"
         private const val PRIVATE_LAN_TLS_CLASS = "com.oplus.aiunit.vision.ktc0"
         private const val PRIVATE_LAN_TLS_METHOD = "k"
-        private const val PREFIX_METHOD = "e"
-        private const val TOKEN_DECRYPT_METHOD = "b"
         private const val MAX_TOKEN_DECRYPT_DIAGNOSTIC_EVENTS = 20
-        private val TOKEN_DECRYPTOR_CLASSES = arrayOf(
-            "com.oplus.aiunit.vision.erq",
-            "com.oplus.aiunit.vision.in80",
-            "com.oplus.aiunit.vision.op80",
-            "com.oplus.aiunit.vision.qp80",
-        )
         private const val BACKUP_PAUSE_REASON_CLASS =
             "com.oplus.gallery.framework.abilities.cloudsync.nas.backup.state.PauseReason"
         private const val BACKUP_CONDITION_METHOD = "b"
