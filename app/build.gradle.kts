@@ -18,8 +18,8 @@ android {
         applicationId = "io.github.colorosfeiniu.bridge"
         minSdk = 26
         targetSdk = 35
-        versionCode = 12
-        versionName = "0.3.4"
+        versionCode = 13
+        versionName = "0.3.5"
     }
 
     if (
@@ -56,4 +56,5 @@ kotlin {
 dependencies {
     // Pure legacy Xposed Bridge module. Do not add libxposed entry points here.
     compileOnly("de.robv.android.xposed:api:$xposedCompileApiVersion")
+    testImplementation("junit:junit:4.13.2")
 }

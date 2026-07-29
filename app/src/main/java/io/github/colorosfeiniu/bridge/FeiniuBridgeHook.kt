@@ -21,6 +21,7 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
         log("loading for ${lpparam.packageName}/${lpparam.processName}")
 
         installPrefixFallback(lpparam)
+        installPrivateLanTlsCompatibility(lpparam)
         GalleryStatFallback.install(lpparam.classLoader)
         installBackupPauseDiagnostics(lpparam)
         installBackupTemperatureCompatibility(lpparam)
@@ -71,6 +72,41 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
             }
         }.onFailure { error ->
             log("prefix fallback install failed: ${error.javaClass.simpleName}: ${error.message}")
+        }
+    }
+
+    private fun installPrivateLanTlsCompatibility(
+        lpparam: XC_LoadPackage.LoadPackageParam,
+    ) {
+        runCatching {
+            val tlsSelectorClass = runCatching {
+                XposedHelpers.findClass(PRIVATE_LAN_TLS_CLASS, lpparam.classLoader)
+            }.getOrNull()
+            if (tlsSelectorClass == null) {
+                log("private LAN TLS compatibility unavailable")
+                return@runCatching
+            }
+            val methods = tlsSelectorClass.declaredMethods.filter { method ->
+                method.name == PRIVATE_LAN_TLS_METHOD &&
+                    Modifier.isStatic(method.modifiers) &&
+                    method.returnType == Boolean::class.javaPrimitiveType &&
+                    method.parameterTypes.contentEquals(arrayOf(String::class.java))
+            }
+            methods.forEach { method ->
+                method.isAccessible = true
+                XposedBridge.hookMethod(method, PrivateLanTlsCompatibilityHook)
+            }
+
+            if (methods.isEmpty()) {
+                log("private LAN TLS compatibility unavailable")
+            } else {
+                log("private LAN TLS compatibility installed")
+            }
+        }.onFailure { error ->
+            log(
+                "private LAN TLS compatibility install failed: " +
+                    "${error.javaClass.simpleName}: ${error.message}",
+            )
         }
     }
 
@@ -643,6 +679,41 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
         private var loggedEventCount = 0
     }
 
+    private object PrivateLanTlsCompatibilityHook : XC_MethodHook() {
+        override fun afterHookedMethod(param: MethodHookParam) {
+            val address = param.args.firstOrNull() as? String
+            if (
+                !PrivateLanTlsPolicy.shouldUseCompatibility(
+                    originalResult = param.result as? Boolean,
+                    hasThrowable = param.hasThrowable(),
+                    address = address,
+                )
+            ) {
+                return
+            }
+
+            param.result = true
+            if (shouldLogActivation()) {
+                log("private LAN TLS compatibility activated")
+            }
+        }
+
+        private fun shouldLogActivation(): Boolean {
+            if (activationLogged) return false
+            return synchronized(this) {
+                if (activationLogged) {
+                    false
+                } else {
+                    activationLogged = true
+                    true
+                }
+            }
+        }
+
+        @Volatile
+        private var activationLogged = false
+    }
+
     private object PrefixResolver {
         @Volatile
         private var cachedPrefix: ResolvedPrefix? = null
@@ -782,6 +853,8 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
 
     companion object {
         private const val TARGET_PACKAGE = "com.coloros.gallery3d"
+        private const val PRIVATE_LAN_TLS_CLASS = "com.oplus.aiunit.vision.ktc0"
+        private const val PRIVATE_LAN_TLS_METHOD = "k"
         private const val PREFIX_METHOD = "e"
         private const val TOKEN_DECRYPT_METHOD = "b"
         private const val MAX_TOKEN_DECRYPT_DIAGNOSTIC_EVENTS = 20
@@ -789,6 +862,7 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
             "com.oplus.aiunit.vision.erq",
             "com.oplus.aiunit.vision.in80",
             "com.oplus.aiunit.vision.op80",
+            "com.oplus.aiunit.vision.qp80",
         )
         private const val BACKUP_PAUSE_REASON_CLASS =
             "com.oplus.gallery.framework.abilities.cloudsync.nas.backup.state.PauseReason"
@@ -802,22 +876,26 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
         private val NAS_BACKUP_STATE_INFO_CLASSES = arrayOf(
             "com.oplus.aiunit.vision.stf",
             "com.oplus.aiunit.vision.o3q",
+            "com.oplus.aiunit.vision.d4q",
         )
         private const val NAS_BACKUP_STATE_FIELD = "g"
         private val NAS_PAUSED_STATE_CLASSES = setOf(
             "com.oplus.aiunit.vision.otf\$h",
             "com.oplus.aiunit.vision.k3q\$h",
+            "com.oplus.aiunit.vision.z3q\$h",
         )
         private const val PAUSE_REASON_FIELD = "a"
         private const val NAS_NOTIFICATION_CONDITION_METHOD = "d"
         private val NAS_NOTIFICATION_CONDITION_CLASSES = arrayOf(
             "com.oplus.aiunit.vision.stf",
             "com.oplus.aiunit.vision.o3q\$a",
+            "com.oplus.aiunit.vision.d4q\$a",
         )
         private val TEMPERATURE_UTIL_CLASSES = arrayOf(
             "com.oplus.aiunit.vision.vwp",
             "com.oplus.aiunit.vision.l370",
             "com.oplus.aiunit.vision.r570",
+            "com.oplus.aiunit.vision.t570",
         )
         private const val TEMPERATURE_METHOD = "a"
         private const val ACTIVITY_LIFECYCLE_CLASS = "com.oplus.aiunit.vision.c50"
@@ -827,6 +905,7 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
         private val NAS_BACKUP_CONDITION_OBSERVER_CLASSES = arrayOf(
             "com.oplus.aiunit.vision.jsf",
             "com.oplus.aiunit.vision.k2q",
+            "com.oplus.aiunit.vision.z2q",
         )
         private const val WLAN_VALIDATED_METHOD = "e"
         private const val MOBILE_VALIDATED_METHOD = "c"

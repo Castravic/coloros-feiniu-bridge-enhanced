@@ -13,10 +13,12 @@ TokenDecryptor directly from its DEX.
 param(
     [string]$OldSources,
     [string]$NewSources,
+    [string]$Gallery164022Sources,
     [string]$HookFile,
     [string]$FallbackFile,
     [string]$CurrentDex,
-    [string]$Dexdump
+    [string]$Dexdump,
+    [switch]$SkipLegacySourceEvidence
 )
 
 $ErrorActionPreference = 'Stop'
@@ -124,17 +126,19 @@ function Assert-CurrentTokenDecryptor {
     }
 }
 
-Assert-Path (Join-Path $OldSources 'com\oplus\aiunit\vision\bsf.java') 'Old Gallery condition checker bsf is missing'
-Assert-Path (Join-Path $OldSources 'com\oplus\aiunit\vision\erq.java') 'Old Gallery token decryptor erq is missing'
-Assert-Path (Join-Path $OldSources 'com\oplus\aiunit\vision\vwp.java') 'Old Gallery temperature util vwp is missing'
-Assert-Path (Join-Path $OldSources 'com\oplus\aiunit\vision\stf.java') 'Old Gallery state info stf is missing'
-Assert-Path (Join-Path $OldSources 'com\oplus\aiunit\vision\otf.java') 'Old Gallery state class otf is missing'
+if (-not $SkipLegacySourceEvidence) {
+    Assert-Path (Join-Path $OldSources 'com\oplus\aiunit\vision\bsf.java') 'Old Gallery condition checker bsf is missing'
+    Assert-Path (Join-Path $OldSources 'com\oplus\aiunit\vision\erq.java') 'Old Gallery token decryptor erq is missing'
+    Assert-Path (Join-Path $OldSources 'com\oplus\aiunit\vision\vwp.java') 'Old Gallery temperature util vwp is missing'
+    Assert-Path (Join-Path $OldSources 'com\oplus\aiunit\vision\stf.java') 'Old Gallery state info stf is missing'
+    Assert-Path (Join-Path $OldSources 'com\oplus\aiunit\vision\otf.java') 'Old Gallery state class otf is missing'
 
-Assert-Path (Join-Path $NewSources 'com\oplus\aiunit\vision\f0q.java') 'New Gallery condition checker f0q is missing'
-Assert-Path (Join-Path $NewSources 'com\oplus\aiunit\vision\in80.java') 'New Gallery token decryptor in80 is missing'
-Assert-Path (Join-Path $NewSources 'com\oplus\aiunit\vision\l370.java') 'New Gallery temperature util l370 is missing'
-Assert-Path (Join-Path $NewSources 'com\oplus\aiunit\vision\o3q.java') 'New Gallery state info o3q is missing'
-Assert-Path (Join-Path $NewSources 'com\oplus\aiunit\vision\k3q.java') 'New Gallery state class k3q is missing'
+    Assert-Path (Join-Path $NewSources 'com\oplus\aiunit\vision\f0q.java') 'New Gallery condition checker f0q is missing'
+    Assert-Path (Join-Path $NewSources 'com\oplus\aiunit\vision\in80.java') 'New Gallery token decryptor in80 is missing'
+    Assert-Path (Join-Path $NewSources 'com\oplus\aiunit\vision\l370.java') 'New Gallery temperature util l370 is missing'
+    Assert-Path (Join-Path $NewSources 'com\oplus\aiunit\vision\o3q.java') 'New Gallery state info o3q is missing'
+    Assert-Path (Join-Path $NewSources 'com\oplus\aiunit\vision\k3q.java') 'New Gallery state class k3q is missing'
+}
 
 Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.bsf' 'Hook source no longer covers old Gallery condition checker bsf'
 Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.erq' 'Hook source no longer covers old Gallery token decryptor erq'
@@ -161,6 +165,49 @@ if (-not [string]::IsNullOrWhiteSpace($CurrentDex) -or -not [string]::IsNullOrWh
     }
     Assert-CurrentTokenDecryptor -DexPath $CurrentDex -DexdumpPath $Dexdump
     Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.op80' 'Hook source does not cover Gallery 16.40.13 token decryptor op80'
+}
+
+if (-not [string]::IsNullOrWhiteSpace($Gallery164022Sources)) {
+    $gallery164022Vision = Join-Path $Gallery164022Sources 'com\oplus\aiunit\vision'
+    $ktc0 = Join-Path $gallery164022Vision 'ktc0.java'
+    $kkc0 = Join-Path $gallery164022Vision 'kkc0.java'
+    $qp80 = Join-Path $gallery164022Vision 'qp80.java'
+    $u0q = Join-Path $gallery164022Vision 'u0q.java'
+    $d4q = Join-Path $gallery164022Vision 'd4q.java'
+    $z3q = Join-Path $gallery164022Vision 'z3q.java'
+    $t570 = Join-Path $gallery164022Vision 't570.java'
+    $z2q = Join-Path $gallery164022Vision 'z2q.java'
+
+    Assert-FileContains $qp80 'public\s+final\s+java\.lang\.String\s+e\s*\(\s*\)' 'Gallery 16.40.22 qp80.e(): String prefix method is missing'
+    Assert-FileContains $qp80 'public\s+final\s+java\.lang\.String\s+b\s*\(\s*java\.lang\.String\s+\w+\s*,\s*java\.lang\.String\s+\w+\s*\)' 'Gallery 16.40.22 qp80.b(String, String): String token decryptor is missing'
+    Assert-FileContains $qp80 'TokenDecryptor' 'Gallery 16.40.22 qp80 no longer matches the TokenDecryptor flow'
+    Assert-FileContains $qp80 'CryptoEngManager' 'Gallery 16.40.22 qp80 no longer uses the CryptoEng prefix flow'
+    Assert-FileContains $u0q 'PauseReason\s+a\s*\(\s*boolean\s+\w+\s*,\s*boolean\s+\w+\s*\)' 'Gallery 16.40.22 u0q backup condition method is missing'
+    Assert-FileContains $d4q 'java\.lang\.String\s+[a-zA-Z0-9_$]+\s*\(\s*android\.content\.Context\s+\w+\s*\)' 'Gallery 16.40.22 d4q backup state text method is missing'
+    Assert-FileContains $z3q 'class\s+h\s+extends\s+com\.oplus\.aiunit\.vision\.z3q' 'Gallery 16.40.22 z3q paused state is missing'
+    Assert-FileContains $t570 'static\s+final\s+float\s+a\s*\(\s*\)' 'Gallery 16.40.22 t570 temperature method is missing'
+    Assert-FileContains $z2q 'final\s+class\s+z2q' 'Gallery 16.40.22 z2q backup manager is missing'
+
+    Assert-FileContains $ktc0 'public\s+static\s+boolean\s+k\s*\(\s*(?:java\.lang\.)?String\s+\w+\s*\)' 'Gallery 16.40.22 ktc0.k(String): boolean signature is missing'
+    Assert-FileContains $ktc0 'if\s*\([^)]*\|\|\s*k\s*\(\s*\w+\s*\)\s*\)' 'Gallery 16.40.22 channel builder no longer selects compatibility TLS through ktc0.k(String)'
+    Assert-FileContains $ktc0 'kkc0\s*\.\s*a\s*\(\s*\)' 'Gallery 16.40.22 IP-literal TLS branch no longer calls kkc0.a()'
+    Assert-FileContains $kkc0 'new\s+(?:com\.oplus\.aiunit\.vision\.)?gic0\s*\(' 'Gallery 16.40.22 kkc0.a() no longer installs gic0'
+
+    Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.ktc0' 'Hook source does not target Gallery 16.40.22 ktc0'
+    Assert-FileContains $HookFile 'PRIVATE_LAN_TLS_METHOD\s*=\s*"k"' 'Hook source does not guard the Gallery 16.40.22 TLS selector method name'
+    Assert-FileContains $HookFile 'Modifier\.isStatic\(method\.modifiers\)' 'Hook source does not require a static Gallery TLS selector'
+    Assert-FileContains $HookFile 'method\.returnType\s*==\s*Boolean::class\.javaPrimitiveType' 'Hook source does not require a primitive boolean Gallery TLS selector result'
+    Assert-FileContains $HookFile 'arrayOf\(String::class\.java\)' 'Hook source does not require exactly one String Gallery TLS selector argument'
+    Assert-FileContains $HookFile 'private LAN TLS compatibility installed' 'Hook source lacks the private-LAN TLS installation diagnostic'
+    Assert-FileContains $HookFile 'private LAN TLS compatibility activated' 'Hook source lacks the privacy-safe private-LAN TLS activation diagnostic'
+
+    Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.qp80' 'Hook source does not cover Gallery 16.40.22 token decryptor qp80'
+    Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.u0q' 'Hook source does not cover Gallery 16.40.22 condition checker u0q'
+    Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.d4q' 'Hook source does not cover Gallery 16.40.22 backup state d4q'
+    Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.z3q\\\$h' 'Hook source does not cover Gallery 16.40.22 paused state z3q$h'
+    Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.d4q\\\$a' 'Hook source does not cover Gallery 16.40.22 notification state d4q$a'
+    Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.t570' 'Hook source does not cover Gallery 16.40.22 temperature utility t570'
+    Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.z2q' 'Hook source does not cover Gallery 16.40.22 backup observer z2q'
 }
 
 Write-Host 'Gallery compatibility hook candidates verified.'
