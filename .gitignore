@@ -1,6 +1,11 @@
 .gradle/
 .analysis/
+.agents/
+.codex/
+.learnings/
+.superpowers/
 .worktrees/
+/docs/superpowers/
 .kotlin/
 /outputs/
 /build/
