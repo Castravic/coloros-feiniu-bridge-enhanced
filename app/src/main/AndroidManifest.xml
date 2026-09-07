@@ -1,22 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application
         android:allowBackup="false"
-        android:extractNativeLibs="false"
         android:hasCode="true"
         android:icon="@drawable/ic_launcher"
-        android:label="ColorOS Feiniu Bridge"
-        android:supportsRtl="true">
-        <meta-data
-            android:name="xposedmodule"
-            android:value="true" />
-        <meta-data
-            android:name="xposeddescription"
-            android:value="Restores ColorOS Gallery Feiniu NAS token prefix loading when cryptoeng denies cmd 26." />
-        <meta-data
-            android:name="xposedminversion"
-            android:value="82" />
-        <meta-data
-            android:name="xposedscope"
-            android:value="com.coloros.gallery3d" />
-    </application>
+        android:label="@string/app_name"
+        android:description="@string/app_description"
+        android:supportsRtl="true" />
 </manifest>

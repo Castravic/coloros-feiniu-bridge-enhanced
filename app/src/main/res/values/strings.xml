@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">ColorOS Feiniu Bridge</string>
+    <string name="app_description">Restores ColorOS Gallery Feiniu NAS token prefix loading when cryptoeng denies cmd 26.</string>
+</resources>

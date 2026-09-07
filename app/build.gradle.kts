@@ -3,7 +3,7 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-val xposedCompileApiVersion = "82"
+val libxposedVersion = "102.0.0"
 
 android {
     namespace = "io.github.colorosfeiniu.bridge"
@@ -13,13 +13,19 @@ android {
         applicationId = "io.github.colorosfeiniu.bridge"
         minSdk = 26
         targetSdk = 35
-        versionCode = 6
-        versionName = "0.1.5"
+        versionCode = 7
+        versionName = "0.2.0"
     }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    packaging {
+        resources {
+            merges += "META-INF/xposed/*"
+        }
     }
 }
 
@@ -28,8 +34,8 @@ kotlin {
 }
 
 dependencies {
-    // Pure legacy Xposed Bridge module. Do not add libxposed entry points here.
-    compileOnly("de.robv.android.xposed:api:$xposedCompileApiVersion")
+    compileOnly("io.github.libxposed:api:$libxposedVersion")
+    testImplementation("io.github.libxposed:api:$libxposedVersion")
     testImplementation("junit:junit:4.13.2")
 }
 
