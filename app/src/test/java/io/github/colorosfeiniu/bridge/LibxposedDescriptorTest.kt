@@ -35,12 +35,12 @@ class LibxposedDescriptorTest {
     }
 
     @Test
-    fun `scope list specifies target gallery package`() {
+    fun `scope list specifies the target packages`() {
         val stream = javaClass.classLoader?.getResourceAsStream("META-INF/xposed/scope.list")
         assertNotNull("META-INF/xposed/scope.list must exist in resources", stream)
         val scopes = stream!!.bufferedReader().readLines().map { it.trim() }.filter { it.isNotEmpty() }
 
-        assertEquals(listOf("com.coloros.gallery3d"), scopes)
+        assertEquals(listOf("com.coloros.gallery3d", "com.heytap.mydevices"), scopes)
     }
 
     @Test

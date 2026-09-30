@@ -31,6 +31,15 @@ class TokenDecryptorLocatorTest {
         ),
     )
 
+    /** Device Space obfuscates the same contract as `m()` / `c(String, String)`. */
+    private val deviceSpaceTarget = Clazz(
+        descriptor = "Laa/d80;",
+        methods = listOf(
+            Method("m", PROTO_NO_ARG, constString = "TokenDecryptor"),
+            Method("c", PROTO_TWO_STRINGS, constString = "unrelated"),
+        ),
+    )
+
     @Test
     fun `locates the class carrying both decryptor methods and the log tag`() {
         val dex = SyntheticDex.build(listOf(decoy, impostor, target))
@@ -72,5 +81,26 @@ class TokenDecryptorLocatorTest {
         requireNotNull(dex)
         assertEquals("TokenDecryptor", dex.firstString { it == "TokenDecryptor" })
         assertNull(dex.firstString { it == "absent" })
+    }
+
+    @Test
+    fun `locates the Device Space decryptor through its own profile`() {
+        val dex = SyntheticDex.build(listOf(decoy, impostor, deviceSpaceTarget))
+
+        assertEquals("aa.d80", TokenDecryptorLocator.locate(dex, TokenDecryptorTargets.MY_DEVICES))
+    }
+
+    @Test
+    fun `Gallery profile ignores a Device Space shaped decryptor`() {
+        val dex = SyntheticDex.build(listOf(decoy, deviceSpaceTarget))
+
+        assertNull(TokenDecryptorLocator.locate(dex))
+    }
+
+    @Test
+    fun `Device Space profile ignores a Gallery shaped decryptor`() {
+        val dex = SyntheticDex.build(listOf(target))
+
+        assertNull(TokenDecryptorLocator.locate(dex, TokenDecryptorTargets.MY_DEVICES))
     }
 }
