@@ -1,7 +1,9 @@
 package io.github.colorosfeiniu.bridge
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TokenDecryptorTargetsTest {
@@ -14,7 +16,7 @@ class TokenDecryptorTargetsTest {
                 "com.oplus.aiunit.vision.op80",
                 "com.oplus.aiunit.vision.qp80",
             ),
-            TokenDecryptorTargets.classNames,
+            TokenDecryptorTargets.GALLERY.classNames,
         )
     }
 
@@ -32,17 +34,56 @@ class TokenDecryptorTargetsTest {
     }
 
     @Test
-    fun `Device Space profile keeps its own member contract`() {
+    fun `Gallery profile keeps the single e and b contract`() {
+        assertEquals(
+            listOf(contract("e", "b")),
+            TokenDecryptorTargets.GALLERY.contracts,
+        )
+    }
+
+    @Test
+    fun `Device Space profile keeps every known obfuscation of its decryptor`() {
         val profile = TokenDecryptorTargets.MY_DEVICES
 
         assertEquals("com.heytap.mydevices", profile.packageName)
-        assertEquals(emptyList<String>(), profile.classNames)
-        assertEquals("m", profile.prefixMethod)
-        assertEquals("()Ljava/lang/String;", profile.prefixMethodDescriptor)
-        assertEquals("c", profile.decryptMethod)
         assertEquals(
-            "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
-            profile.decryptMethodDescriptor,
+            listOf("com.trim.connectiondemo.utils.TokenDecryptor"),
+            profile.classNames,
+        )
+        assertEquals(
+            listOf(
+                contract("m", "c"),
+                contract("obtainPresharedSecretForDecrypt", "decrypt"),
+            ),
+            profile.contracts,
         )
     }
+
+    @Test
+    fun `prefix loader lookup spans every contract of a profile`() {
+        val profile = TokenDecryptorTargets.MY_DEVICES
+
+        assertTrue(profile.matchesPrefixLoader("m"))
+        assertTrue(profile.matchesPrefixLoader("obtainPresharedSecretForDecrypt"))
+        assertFalse(profile.matchesPrefixLoader("e"))
+        assertFalse(profile.matchesPrefixLoader("decrypt"))
+    }
+
+    @Test
+    fun `decrypt entry point lookup spans every contract of a profile`() {
+        val profile = TokenDecryptorTargets.MY_DEVICES
+
+        assertTrue(profile.matchesDecryptEntryPoint("c"))
+        assertTrue(profile.matchesDecryptEntryPoint("decrypt"))
+        assertFalse(profile.matchesDecryptEntryPoint("b"))
+        assertFalse(profile.matchesDecryptEntryPoint("m"))
+    }
+
+    private fun contract(prefixMethod: String, decryptMethod: String) =
+        TokenDecryptorContract(
+            prefixMethod = prefixMethod,
+            prefixMethodDescriptor = "()Ljava/lang/String;",
+            decryptMethod = decryptMethod,
+            decryptMethodDescriptor = "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+        )
 }

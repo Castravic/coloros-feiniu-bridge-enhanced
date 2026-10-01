@@ -143,7 +143,7 @@ class FeiniuBridgeHook : XposedModule() {
         ): List<Method> =
             runCatching {
                 clazz.declaredMethods.filter { method ->
-                    method.name == profile.prefixMethod &&
+                    profile.matchesPrefixLoader(method.name) &&
                         method.returnType == String::class.java &&
                         method.parameterTypes.isEmpty()
                 }
@@ -155,7 +155,7 @@ class FeiniuBridgeHook : XposedModule() {
         ): Boolean =
             runCatching {
                 clazz.declaredMethods.any { method ->
-                    method.name == profile.decryptMethod &&
+                    profile.matchesDecryptEntryPoint(method.name) &&
                         method.returnType == String::class.java &&
                         method.parameterTypes.size == 2 &&
                         method.parameterTypes.all { it == String::class.java }

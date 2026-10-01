@@ -3,14 +3,16 @@ package io.github.colorosfeiniu.bridge
 /**
  * Finds an application's token decryptor by shape rather than by obfuscated name.
  *
- * A class qualifies only when all three hold, which across Gallery 16.40.22 and MyDevices 17.5.5
- * matches exactly one class in the whole APK:
+ * A class qualifies only when all three hold, which across every APK seen so far matches exactly one
+ * class in the whole APK:
  *
  * 1. the DEX declares the `TokenDecryptor` log tag at all,
- * 2. the class declares both [TokenDecryptorProfile.prefixMethod] and the decrypt entry point
- *    described by [TokenDecryptorProfile.decryptMethod],
+ * 2. the class declares both members of one of [TokenDecryptorProfile.contracts],
  * 3. the class body actually loads that log tag, ruling out unrelated classes that happen to share
  *    the two obfuscated member names.
+ *
+ * Several contracts are tried because one application can ship more than one obfuscation of the same
+ * decryptor; see [TokenDecryptorTargets.MY_DEVICES].
  */
 internal object TokenDecryptorLocator {
 
@@ -24,9 +26,10 @@ internal object TokenDecryptorLocator {
         if (tagIndex < 0) return null
 
         return reader.firstClass { clazz ->
-            clazz.declaresMethod(profile.prefixMethod, profile.prefixMethodDescriptor) &&
-                clazz.declaresMethod(profile.decryptMethod, profile.decryptMethodDescriptor) &&
-                clazz.referencesString(tagIndex)
+            profile.contracts.any { contract ->
+                clazz.declaresMethod(contract.prefixMethod, contract.prefixMethodDescriptor) &&
+                    clazz.declaresMethod(contract.decryptMethod, contract.decryptMethodDescriptor)
+            } && clazz.referencesString(tagIndex)
         }?.className
     }
 }

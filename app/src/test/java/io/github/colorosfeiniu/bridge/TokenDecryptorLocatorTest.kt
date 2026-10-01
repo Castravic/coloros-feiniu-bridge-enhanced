@@ -40,6 +40,15 @@ class TokenDecryptorLocatorTest {
         ),
     )
 
+    /** MyDevices 17.25.10 drops the obfuscation and renames both members. */
+    private val deviceSpacePlainTarget = Clazz(
+        descriptor = "Lcom/trim/connectiondemo/utils/TokenDecryptor;",
+        methods = listOf(
+            Method("obtainPresharedSecretForDecrypt", PROTO_NO_ARG, constString = "TokenDecryptor"),
+            Method("decrypt", PROTO_TWO_STRINGS, constString = "unrelated"),
+        ),
+    )
+
     @Test
     fun `locates the class carrying both decryptor methods and the log tag`() {
         val dex = SyntheticDex.build(listOf(decoy, impostor, target))
@@ -102,5 +111,29 @@ class TokenDecryptorLocatorTest {
         val dex = SyntheticDex.build(listOf(target))
 
         assertNull(TokenDecryptorLocator.locate(dex, TokenDecryptorTargets.MY_DEVICES))
+    }
+
+    @Test
+    fun `locates the Device Space decryptor of MyDevices 17 25 10 through the same profile`() {
+        val dex = SyntheticDex.build(listOf(decoy, impostor, deviceSpacePlainTarget))
+
+        assertEquals(
+            "com.trim.connectiondemo.utils.TokenDecryptor",
+            TokenDecryptorLocator.locate(dex, TokenDecryptorTargets.MY_DEVICES),
+        )
+    }
+
+    @Test
+    fun `Device Space profile accepts either known obfuscation in one dex`() {
+        val dex = SyntheticDex.build(listOf(decoy, deviceSpaceTarget, deviceSpacePlainTarget))
+
+        assertEquals("aa.d80", TokenDecryptorLocator.locate(dex, TokenDecryptorTargets.MY_DEVICES))
+    }
+
+    @Test
+    fun `Gallery profile ignores the un-obfuscated Device Space decryptor`() {
+        val dex = SyntheticDex.build(listOf(deviceSpacePlainTarget))
+
+        assertNull(TokenDecryptorLocator.locate(dex))
     }
 }
