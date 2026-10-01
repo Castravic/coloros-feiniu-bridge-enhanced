@@ -40,7 +40,7 @@ dependencies {
 }
 
 tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
-    System.getProperty("gallery.dex.path")?.let { path ->
-        systemProperty("gallery.dex.path", path)
+    listOf("gallery.dex.path", "mydevices.dex.path").forEach { property ->
+        System.getProperty(property)?.let { path -> systemProperty(property, path) }
     }
 }

@@ -12,12 +12,12 @@ import java.util.zip.ZipFile
 class FeiniuBridgeHook : XposedModule() {
 
     override fun onPackageReady(param: PackageReadyParam) {
-        if (param.packageName != TARGET_PACKAGE) return
+        val profile = TokenDecryptorTargets.forPackage(param.packageName) ?: return
 
         runCatching {
             val appInfo = param.applicationInfo
             val classLoader = param.classLoader
-            val target = TargetResolver.resolve(classLoader, appInfo, ::logInfo)
+            val target = TargetResolver.resolve(classLoader, appInfo, profile, ::logInfo)
             target.methods.forEach { method ->
                 method.isAccessible = true
                 hook(method).intercept { chain ->
@@ -79,7 +79,7 @@ class FeiniuBridgeHook : XposedModule() {
     }
 
     /**
-     * Locates the prefix loader to hook.
+     * Locates the prefix loader to hook for one target profile.
      *
      * A known class is accepted immediately only when its full method contract is confirmed. If
      * none qualify, structural DEX discovery runs before the name-only fallback kept for legacy
@@ -90,19 +90,20 @@ class FeiniuBridgeHook : XposedModule() {
         fun resolve(
             classLoader: ClassLoader,
             appInfo: ApplicationInfo,
+            profile: TokenDecryptorProfile,
             logger: (String) -> Unit,
         ): Target {
-            val knownCandidates = TokenDecryptorTargets.classNames
+            val knownCandidates = profile.classNames
                 .mapNotNull { className -> findClass(className, classLoader) }
             val resolved = TokenDecryptorTargetResolver.resolve(
                 knownCandidates,
-                hasPrefixLoader = { prefixMethodsOf(it).isNotEmpty() },
-                hasDecryptEntryPoint = ::declaresDecryptEntryPoint,
-                locateByShape = { resolveClassByShape(classLoader, appInfo, logger) },
+                hasPrefixLoader = { prefixMethodsOf(it, profile).isNotEmpty() },
+                hasDecryptEntryPoint = { declaresDecryptEntryPoint(it, profile) },
+                locateByShape = { resolveClassByShape(classLoader, appInfo, profile, logger) },
             ) ?: return Target(emptyList(), null, "none")
 
             return Target(
-                prefixMethodsOf(resolved.target),
+                prefixMethodsOf(resolved.target, profile),
                 resolved.target.name,
                 resolved.source.logValue,
             )
@@ -111,11 +112,14 @@ class FeiniuBridgeHook : XposedModule() {
         private fun resolveClassByShape(
             classLoader: ClassLoader,
             appInfo: ApplicationInfo,
+            profile: TokenDecryptorProfile,
             logger: (String) -> Unit,
         ): Class<*>? {
-            val className = ApkDex.scan(appInfo, logger) { bytes -> TokenDecryptorLocator.locate(bytes) }
+            val className = ApkDex.scan(appInfo, logger) { bytes ->
+                TokenDecryptorLocator.locate(bytes, profile)
+            }
             if (className == null) {
-                logger("dex scan did not find a token decryptor class")
+                logger("dex scan did not find a token decryptor class for ${profile.packageName}")
                 return null
             }
 
@@ -125,7 +129,7 @@ class FeiniuBridgeHook : XposedModule() {
                 return null
             }
 
-            val methods = prefixMethodsOf(clazz)
+            val methods = prefixMethodsOf(clazz, profile)
             if (methods.isEmpty()) return null
             return clazz
         }
@@ -133,19 +137,25 @@ class FeiniuBridgeHook : XposedModule() {
         private fun findClass(className: String, classLoader: ClassLoader): Class<*>? =
             runCatching { Class.forName(className, false, classLoader) }.getOrNull()
 
-        private fun prefixMethodsOf(clazz: Class<*>): List<Method> =
+        private fun prefixMethodsOf(
+            clazz: Class<*>,
+            profile: TokenDecryptorProfile,
+        ): List<Method> =
             runCatching {
                 clazz.declaredMethods.filter { method ->
-                    method.name == TokenDecryptorTargets.PREFIX_METHOD &&
+                    profile.matchesPrefixLoader(method.name) &&
                         method.returnType == String::class.java &&
                         method.parameterTypes.isEmpty()
                 }
             }.getOrDefault(emptyList())
 
-        private fun declaresDecryptEntryPoint(clazz: Class<*>): Boolean =
+        private fun declaresDecryptEntryPoint(
+            clazz: Class<*>,
+            profile: TokenDecryptorProfile,
+        ): Boolean =
             runCatching {
                 clazz.declaredMethods.any { method ->
-                    method.name == TokenDecryptorTargets.DECRYPT_METHOD &&
+                    profile.matchesDecryptEntryPoint(method.name) &&
                         method.returnType == String::class.java &&
                         method.parameterTypes.size == 2 &&
                         method.parameterTypes.all { it == String::class.java }
@@ -180,7 +190,7 @@ class FeiniuBridgeHook : XposedModule() {
             length in 16..80 && PREFIX_REGEX.matches(this)
     }
 
-    /** Walks the DEX images of the installed Gallery APKs. */
+    /** Walks the DEX images of the installed target APKs. */
     private object ApkDex {
 
         fun <T : Any> scan(
@@ -245,7 +255,6 @@ class FeiniuBridgeHook : XposedModule() {
 
     companion object {
         private const val TAG = "ColorOSFeiniuBridge"
-        private const val TARGET_PACKAGE = "com.coloros.gallery3d"
         private const val KNOWN_PREFIX = "tRiM@2025#GwToken!sEcReT*kEy&vALu"
         private val PREFIX_REGEX = Regex("""[A-Za-z][A-Za-z0-9@#_!*&$%+?.-]{7,79}GwToken[A-Za-z0-9@#_!*&$%+?.-]{4,80}""")
 
