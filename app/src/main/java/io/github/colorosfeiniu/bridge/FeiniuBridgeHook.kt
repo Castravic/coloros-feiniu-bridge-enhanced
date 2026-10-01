@@ -36,27 +36,52 @@ class FeiniuBridgeHook : XposedModule() {
     }
 
     private fun interceptPrefixCall(chain: Chain, appInfo: ApplicationInfo): Any? {
-        val result = chain.proceed()
-        if (!result.isNullOrBlankString()) return result
+        val result = runCatching { chain.proceed() }
+        val error = result.exceptionOrNull()
+        // An Error says the process itself is in trouble; only the loader's own failures fall back.
+        if (error is Error) throw error
 
-        val resolved = PrefixResolver.resolve(appInfo, ::logInfo)
-        if (resolved == null) {
-            logWarn("prefix fallback unavailable")
-            return result
-        }
+        val decision = PrefixFallbackDecision.decide(
+            returned = result.getOrNull(),
+            error = error,
+            fallback = { PrefixResolver.resolve(appInfo, ::logInfo) },
+        )
 
-        if (shouldLogFallback()) {
-            logInfo("prefix fallback supplied source=${resolved.source} len=${resolved.value.length}")
+        return when (decision) {
+            is PrefixFallbackDecision.Outcome.Passthrough -> decision.value
+            is PrefixFallbackDecision.Outcome.Supply -> {
+                logLoaderThrow(error)
+                if (shouldLogFallback()) {
+                    val prefix = decision.prefix
+                    logInfo(
+                        "prefix fallback supplied source=${prefix.source} len=${prefix.value.length}",
+                    )
+                }
+                decision.prefix.value
+            }
+            is PrefixFallbackDecision.Outcome.Rethrow -> {
+                logLoaderThrow(decision.error)
+                logWarn("prefix fallback unavailable")
+                throw decision.error
+            }
         }
-        return resolved.value
+    }
+
+    private fun logLoaderThrow(error: Throwable?) {
+        if (error == null || !shouldLogThrow()) return
+        logWarn("prefix loader threw ${error.javaClass.simpleName}: ${error.message}", error)
     }
 
     private fun logInfo(message: String) {
         log(Log.INFO, TAG, message)
     }
 
-    private fun logWarn(message: String) {
-        log(Log.WARN, TAG, message)
+    private fun logWarn(message: String, throwable: Throwable? = null) {
+        if (throwable != null) {
+            log(Log.WARN, TAG, message, throwable)
+        } else {
+            log(Log.WARN, TAG, message)
+        }
     }
 
     private fun logError(message: String, throwable: Throwable? = null) {
@@ -73,6 +98,17 @@ class FeiniuBridgeHook : XposedModule() {
                 false
             } else {
                 fallbackLogged = true
+                true
+            }
+        }
+    }
+
+    private fun shouldLogThrow(): Boolean {
+        return !throwLogged && synchronized(throwLock) {
+            if (throwLogged) {
+                false
+            } else {
+                throwLogged = true
                 true
             }
         }
@@ -248,11 +284,6 @@ class FeiniuBridgeHook : XposedModule() {
         }
     }
 
-    private data class ResolvedPrefix(
-        val value: String,
-        val source: String,
-    )
-
     companion object {
         private const val TAG = "ColorOSFeiniuBridge"
         private const val KNOWN_PREFIX = "tRiM@2025#GwToken!sEcReT*kEy&vALu"
@@ -262,8 +293,8 @@ class FeiniuBridgeHook : XposedModule() {
         private var fallbackLogged = false
         private val fallbackLock = Any()
 
-        private fun Any?.isNullOrBlankString(): Boolean {
-            return (this as? String).isNullOrBlank()
-        }
+        @Volatile
+        private var throwLogged = false
+        private val throwLock = Any()
     }
 }

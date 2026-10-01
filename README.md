@@ -173,6 +173,7 @@ ColorOSFeiniuBridge: prefix fallback supplied source=apk-dex len=33
 - `prefix fallback unavailable for com.heytap.mydevices`：同上，设备空间的 token 解密结构变了。
 - `dex scan did not find a token decryptor class for …`：结构定位扫完全部 dex 无果，同上。
 - 没有 `prefix fallback supplied`：原始 `cryptoeng` 可能已经成功，或者没有触发飞牛入口。
+- `prefix loader threw …`：目标应用的解密方法自己抛了异常。后面跟着 `prefix fallback supplied` 说明模块已用自己的前缀顶替；只出现它而没有跟随时，异常按原样抛回应用。该日志每进程只记一次，并附带堆栈。
 - fallback 后仍无法连接：检查目标应用日志里是否有 `AEADBadTagException`、token 过期、NAS 不可达、账号绑定异常等问题。
 - token 解密成功但相册为空：本模块只恢复连接构造，照片索引和同步状态由相册与飞牛 NAS 自身处理。
 
