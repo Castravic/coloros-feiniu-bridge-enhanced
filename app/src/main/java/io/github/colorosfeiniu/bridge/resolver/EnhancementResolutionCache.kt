@@ -14,14 +14,17 @@ internal class EnhancementResolutionCache(
     context: Context,
     private val fingerprint: GalleryFingerprint,
 ) {
-    private val preferences = context.getSharedPreferences(PREFERENCES_FILE, Context.MODE_PRIVATE)
-    private val key = "enhancement.${fingerprint.cacheNamespace()}"
+    private val preferences = context.getSharedPreferences(
+        EnhancementCachePolicy.PREFERENCES_FILE,
+        Context.MODE_PRIVATE,
+    )
+    private val key = EnhancementCachePolicy.keyFor(fingerprint.cacheNamespace())
 
     fun read(validator: (EnhancementTargets) -> Boolean): EnhancementTargets? {
         val encoded = preferences.getString(key, null) ?: return null
         val decoded = runCatching {
             val root = JSONObject(encoded)
-            require(root.getInt("schema") == CACHE_SCHEMA)
+            require(root.getInt("schema") == EnhancementCachePolicy.CACHE_SCHEMA)
             EnhancementTargets(
                 temperatureProvider = decodeMethod(root.optJSONObject("temperature")),
                 pauseConditionCheckers = decodeMethods(root.optJSONArray("checkers")),
@@ -31,7 +34,11 @@ internal class EnhancementResolutionCache(
             )
         }.getOrNull()
 
-        if (decoded == null || !validator(decoded)) {
+        if (
+            decoded == null ||
+            !EnhancementCachePolicy.isConsistent(decoded) ||
+            !validator(decoded)
+        ) {
             preferences.edit().remove(key).apply()
             return null
         }
@@ -39,8 +46,9 @@ internal class EnhancementResolutionCache(
     }
 
     fun write(targets: EnhancementTargets) {
+        if (!EnhancementCachePolicy.shouldWrite(targets)) return
         val root = JSONObject()
-            .put("schema", CACHE_SCHEMA)
+            .put("schema", EnhancementCachePolicy.CACHE_SCHEMA)
             .put("checkers", JSONArray().apply {
                 targets.pauseConditionCheckers.forEach { checker -> put(encodeMethod(checker)) }
             })
@@ -68,10 +76,5 @@ internal class EnhancementResolutionCache(
         return List(values.length()) { index ->
             decodeMethod(values.optJSONObject(index))
         }.filterNotNull()
-    }
-
-    private companion object {
-        const val PREFERENCES_FILE = "coloros_feiniu_bridge"
-        const val CACHE_SCHEMA = 1
     }
 }

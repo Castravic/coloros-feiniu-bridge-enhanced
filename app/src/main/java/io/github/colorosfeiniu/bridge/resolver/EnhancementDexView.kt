@@ -8,6 +8,11 @@ import io.github.colorosfeiniu.bridge.DexFile
  * Only classes that can possibly matter are emitted — the ones loading an anchor string and the
  * subclasses of `SyncStateInfo` — because a real Gallery APK carries ~120k classes and materialising
  * strings and methods for all of them would be wasteful on device.
+ *
+ * A dex that loads none of the anchors is *not* skipped: the `SyncStateInfo` subclasses live in
+ * several dex files (17.9.24: classes2/9/10/17), so the superclass check still has to run over every
+ * class. For an anchor-less dex `referencedStrings(emptySet())` is the cheap no-op path, so the walk
+ * only pays for the class-def table it already reads.
  */
 internal object EnhancementDexView {
 
@@ -16,7 +21,6 @@ internal object EnhancementDexView {
         val anchorIndices = ANCHOR_VALUES
             .map { value -> reader.indexOfString(value) }
             .filter { index -> index >= 0 }
-        if (anchorIndices.isEmpty()) return emptyList()
 
         val views = mutableListOf<ClassView>()
         for (clazz in reader.classes()) {
@@ -27,7 +31,14 @@ internal object EnhancementDexView {
                 className = clazz.className,
                 superClassName = clazz.superClassName,
                 methods = clazz.methodShapes().map { method ->
-                    MethodView(method.name, method.descriptor, method.isStatic)
+                    MethodView(
+                        name = method.name,
+                        descriptor = method.descriptor,
+                        isStatic = method.isStatic,
+                        fieldRefs = method.fieldRefs.map { ref ->
+                            FieldRefView(ref.owner, ref.name, ref.type)
+                        },
+                    )
                 },
                 strings = strings,
             )

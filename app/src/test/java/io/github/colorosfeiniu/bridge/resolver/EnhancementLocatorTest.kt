@@ -14,7 +14,9 @@ import org.junit.Test
  * * `com.oplus.aiunit.vision.ui90` — `a()F`, loads `debug.gallery.temperature.test` /
  *   `debug.gallery.temperature.level`;
  * * `com.oplus.aiunit.vision.wxr` — `b(ZZ)PauseReason` (and the raw `a(ZZ)...`), loads `NasBackupCondChk`;
- * * `com.oplus.aiunit.vision.u0s` extends `com.oplus.gallery.business_lib.cloudsync.SyncStateInfo`.
+ * * `com.oplus.aiunit.vision.u0s` extends `com.oplus.gallery.business_lib.cloudsync.SyncStateInfo`
+ *   and its `m(int, Context)` text method reads the paused state: a `PauseReason`-typed field and
+ *   the `R.string.nas_backup_paused*` resources.
  */
 class EnhancementLocatorTest {
 
@@ -22,7 +24,20 @@ class EnhancementLocatorTest {
         name: String,
         descriptor: String,
         isStatic: Boolean = false,
-    ) = MethodView(name, descriptor, isStatic)
+        fieldRefs: List<FieldRefView> = emptyList(),
+    ) = MethodView(name, descriptor, isStatic, fieldRefs)
+
+    private fun pauseReasonField() = FieldRefView(
+        owner = "com.oplus.aiunit.vision.q0s\$h",
+        name = "a",
+        type = EnhancementLocator.PAUSE_REASON_DESCRIPTOR,
+    )
+
+    private fun pausedStringField(name: String) = FieldRefView(
+        owner = EnhancementLocator.NAS_STRING_RESOURCE_OWNER,
+        name = name,
+        type = "I",
+    )
 
     private val temperatureProvider = ClassView(
         className = "com.oplus.aiunit.vision.ui90",
@@ -51,7 +66,11 @@ class EnhancementLocatorTest {
         className = "com.oplus.aiunit.vision.u0s",
         superClassName = EnhancementLocator.STATE_INFO_SUPERCLASS,
         methods = listOf(
-            method("m", "(ILandroid/content/Context;)Ljava/lang/String;"),
+            method(
+                "m",
+                "(ILandroid/content/Context;)Ljava/lang/String;",
+                fieldRefs = listOf(pauseReasonField(), pausedStringField("nas_backup_paused")),
+            ),
             method("l", "(Landroid/content/Context;)Ljava/util/List;"),
         ),
         strings = emptySet(),
@@ -140,12 +159,52 @@ class EnhancementLocatorTest {
 
         assertNull(targets.pauseStateInfoClass)
         assertNull(targets.pauseReasonText)
+        assertTrue(targets.diagnostics.any { it == "pause reason text: candidates=2" })
+    }
+
+    @Test
+    fun `a state info subclass without the pause trace is not a candidate`() {
+        // The loose "SyncStateInfo subclass with a text method" predicate matches 14 classes in the
+        // real 17.9.24 APK; without the field trace the enhancement must stay off.
+        val textOnly = stateInfo.copy(
+            methods = listOf(method("m", "(ILandroid/content/Context;)Ljava/lang/String;")),
+        )
+
+        val targets = EnhancementLocator.locate(listOf(textOnly))
+
+        assertNull(targets.pauseStateInfoClass)
+        assertNull(targets.pauseReasonText)
+        assertTrue(targets.diagnostics.any { it == "pause reason text: candidates=0" })
+    }
+
+    @Test
+    fun `a nas_backup_paused resource reference is a sufficient pause trace`() {
+        val resourceTraced = stateInfo.copy(
+            methods = listOf(
+                method(
+                    "m",
+                    "(Landroid/content/Context;)Ljava/lang/String;",
+                    fieldRefs = listOf(pausedStringField("nas_backup_paused_low_battery")),
+                ),
+            ),
+        )
+
+        val targets = EnhancementLocator.locate(listOf(resourceTraced))
+
+        assertEquals("com.oplus.aiunit.vision.u0s", targets.pauseStateInfoClass)
+        assertEquals("m", targets.pauseReasonText?.methodName)
     }
 
     @Test
     fun `state info still resolves when the text method takes an int first`() {
         val intFirst = stateInfo.copy(
-            methods = listOf(method("m", "(ILandroid/content/Context;)Ljava/lang/String;")),
+            methods = listOf(
+                method(
+                    "m",
+                    "(ILandroid/content/Context;)Ljava/lang/String;",
+                    fieldRefs = listOf(pauseReasonField()),
+                ),
+            ),
         )
 
         assertEquals("com.oplus.aiunit.vision.u0s", EnhancementLocator.locate(listOf(intFirst)).pauseStateInfoClass)

@@ -15,6 +15,8 @@ internal class DexFile private constructor(private val data: ByteArray) {
     private val typeIdsOffset = data.uintAt(TYPE_IDS_OFFSET)
     private val protoIdsSize = data.uintAt(PROTO_IDS_SIZE)
     private val protoIdsOffset = data.uintAt(PROTO_IDS_OFFSET)
+    private val fieldIdsSize = data.uintAt(FIELD_IDS_SIZE)
+    private val fieldIdsOffset = data.uintAt(FIELD_IDS_OFFSET)
     private val methodIdsSize = data.uintAt(METHOD_IDS_SIZE)
     private val methodIdsOffset = data.uintAt(METHOD_IDS_OFFSET)
     private val classDefsSize = data.uintAt(CLASS_DEFS_SIZE)
@@ -123,6 +125,17 @@ internal class DexFile private constructor(private val data: ByteArray) {
         return "($parameters)$returnType"
     }
 
+    /** Resolves a `field_id` into its owner class, field name and type descriptor. */
+    private fun fieldRef(index: Int): FieldRef? {
+        if (index < 0 || index >= fieldIdsSize) return null
+        val entry = fieldIdsOffset + index * FIELD_ID_SIZE
+        if (entry < 0 || entry + FIELD_ID_SIZE > data.size) return null
+        val owner = typeDescriptor(data.ushortAt(entry))?.toClassName() ?: return null
+        val type = typeDescriptor(data.ushortAt(entry + FIELD_ID_TYPE)) ?: return null
+        val name = string(data.uintAt(entry + FIELD_ID_NAME)) ?: return null
+        return FieldRef(owner, name, type)
+    }
+
     /** Resolves a `method_id` into its name and `(params)return` descriptor. */
     private fun methodRef(index: Int): Pair<String, String>? {
         if (index < 0 || index >= methodIdsSize) return null
@@ -133,11 +146,23 @@ internal class DexFile private constructor(private val data: ByteArray) {
         return name to proto
     }
 
+    /**
+     * A field reference as read from a `field_id` item: the declaring class, the field name and the
+     * field type descriptor. The owner and the type stay in the un-obfuscated form the Gallery
+     * resource/enum classes use, so they survive obfuscation.
+     */
+    data class FieldRef(
+        val owner: String,
+        val name: String,
+        val type: String,
+    )
+
     /** A method as declared by a class, with the access flags the locators filter on. */
     data class MethodShape(
         val name: String,
         val descriptor: String,
         val accessFlags: Int,
+        val fieldRefs: List<FieldRef>,
     ) {
         val isStatic: Boolean get() = accessFlags and ACC_STATIC != 0
     }
@@ -156,7 +181,7 @@ internal class DexFile private constructor(private val data: ByteArray) {
 
         /** Declared methods of this class only, as name/descriptor/access tuples. */
         fun methodShapes(): List<MethodShape> = methods.map { method ->
-            MethodShape(method.name, method.descriptor, method.accessFlags)
+            MethodShape(method.name, method.descriptor, method.accessFlags, method.fieldRefs())
         }
 
         fun declaresMethod(name: String, descriptor: String): Boolean =
@@ -241,6 +266,32 @@ internal class DexFile private constructor(private val data: ByteArray) {
             return false
         }
 
+        /** Every `field_id` this method reads or writes, resolved to owner/name/type. */
+        fun fieldRefs(): List<DexFile.FieldRef> = fieldRefIndices().mapNotNull { index ->
+            fieldRef(index)
+        }
+
+        /** Indices of every field-access operand in this method's code item. */
+        fun fieldRefIndices(): List<Int> {
+            if (codeOffset <= 0 || codeOffset + CODE_ITEM_HEADER_SIZE > data.size) return emptyList()
+            val units = data.uintAt(codeOffset + CODE_ITEM_INSNS_SIZE)
+            if (units <= 0) return emptyList()
+            val start = codeOffset + CODE_ITEM_HEADER_SIZE
+            val end = start + units * 2
+            if (end > data.size) return emptyList()
+
+            val result = ArrayList<Int>()
+            var cursor = start
+            while (cursor + 2 <= end) {
+                val opcode = data[cursor].toInt() and 0xff
+                if (opcode in OP_IGET..OP_SPUT_SHORT && cursor + 4 <= end) {
+                    result += data.ushortAt(cursor + 2)
+                }
+                cursor += instructionUnits(opcode) * 2
+            }
+            return result
+        }
+
         /** Indices of every `const-string` operand in this method's code item. */
         fun constStringIndices(): List<Int> {
             if (codeOffset <= 0 || codeOffset + CODE_ITEM_HEADER_SIZE > data.size) return emptyList()
@@ -291,6 +342,8 @@ internal class DexFile private constructor(private val data: ByteArray) {
         private const val TYPE_IDS_OFFSET = 0x44
         private const val PROTO_IDS_SIZE = 0x48
         private const val PROTO_IDS_OFFSET = 0x4c
+        private const val FIELD_IDS_SIZE = 0x50
+        private const val FIELD_IDS_OFFSET = 0x54
         private const val METHOD_IDS_SIZE = 0x58
         private const val METHOD_IDS_OFFSET = 0x5c
         private const val CLASS_DEFS_SIZE = 0x60
@@ -304,6 +357,9 @@ internal class DexFile private constructor(private val data: ByteArray) {
         private const val CLASS_DEF_SUPERCLASS = 8
         private const val NO_INDEX = -1
         private const val ACC_STATIC = 0x8
+        private const val FIELD_ID_SIZE = 8
+        private const val FIELD_ID_TYPE = 2
+        private const val FIELD_ID_NAME = 4
         private const val METHOD_ID_SIZE = 8
         private const val METHOD_ID_PROTO = 2
         private const val METHOD_ID_NAME = 4
@@ -314,6 +370,10 @@ internal class DexFile private constructor(private val data: ByteArray) {
 
         private const val OP_CONST_STRING = 0x1a
         private const val OP_CONST_STRING_JUMBO = 0x1b
+
+        /** `iget` … `sput-short` are the format 22c field-access opcodes. */
+        private const val OP_IGET = 0x52
+        private const val OP_SPUT_SHORT = 0x6d
 
         /**
          * Instruction width in 16-bit code units, indexed by opcode. Walking instructions properly

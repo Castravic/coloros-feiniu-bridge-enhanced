@@ -5,7 +5,6 @@ import io.github.colorosfeiniu.bridge.resolver.EnhancementLocator
 import java.io.File
 import java.util.zip.ZipFile
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 
@@ -42,8 +41,8 @@ class RealGalleryEnhancementDexValidationTest {
         val targets = EnhancementLocator.locate(views)
         assertEquals("com.oplus.aiunit.vision.ui90", targets.temperatureProvider?.className)
         assertEquals("com.oplus.aiunit.vision.wxr", targets.pauseConditionCheckers.firstOrNull()?.className)
-        assertNotNull(targets.pauseStateInfoClass)
-        assertNotNull(targets.pauseReasonText)
+        assertEquals("com.oplus.aiunit.vision.u0s", targets.pauseStateInfoClass)
+        assertEquals("m", targets.pauseReasonText?.methodName)
     }
 
     private companion object {

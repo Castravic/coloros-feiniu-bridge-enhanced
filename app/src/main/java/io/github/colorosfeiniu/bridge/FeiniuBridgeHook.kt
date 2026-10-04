@@ -1,5 +1,6 @@
 package io.github.colorosfeiniu.bridge
 
+import android.app.Application
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.util.Log
@@ -22,6 +23,7 @@ import java.lang.reflect.Method
 import java.lang.reflect.Modifier
 import java.lang.reflect.Proxy
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.ZipFile
 
 /**
@@ -112,7 +114,60 @@ class FeiniuBridgeHook : XposedModule() {
 
         installPrivateLanTlsCompatibility(classLoader)
 
-        val enhancements = resolveGalleryEnhancements(appInfo, classLoader)
+        installGalleryEnhancements(appInfo, classLoader)
+    }
+
+    /**
+     * Installs the Gallery enhancement hooks as soon as a `Context` is available.
+     *
+     * The resolver reads and writes the per-fingerprint cache, and inside `onPackageReady`
+     * `ActivityThread.currentApplication()` is still null (the Application has not been created
+     * yet) — the exact reason the enhancement cache was never written. Mirroring
+     * [ConnectionResolutionBootstrap], the resolve + install pass runs on `Application.attach`,
+     * taking the context from the hook argument. That is still far before any backup/temperature
+     * code runs, so no existing hook timing is lost.
+     */
+    private fun installGalleryEnhancements(appInfo: ApplicationInfo, classLoader: ClassLoader) {
+        currentApplication()?.let { context ->
+            runGalleryEnhancements(context, appInfo, classLoader)
+            return
+        }
+
+        val started = AtomicBoolean(false)
+        runCatching {
+            val attach = Application::class.java.getDeclaredMethod("attach", Context::class.java)
+            attach.isAccessible = true
+            hook(attach).intercept { chain ->
+                val result = chain.proceed()
+                if (started.compareAndSet(false, true)) {
+                    runCatching {
+                        runGalleryEnhancements(chain.getArg(0) as? Context, appInfo, classLoader)
+                    }.onFailure { error ->
+                        logError(
+                            "gallery enhancement install failed: " +
+                                "${error.javaClass.simpleName}: ${error.message}",
+                            error,
+                        )
+                    }
+                }
+                result
+            }
+            logInfo("gallery enhancement resolution deferred to Application.attach")
+        }.onFailure { error ->
+            logWarn(
+                "gallery enhancement deferral unavailable: " +
+                    "${error.javaClass.simpleName}: ${error.message}",
+            )
+            runGalleryEnhancements(currentApplication(), appInfo, classLoader)
+        }
+    }
+
+    private fun runGalleryEnhancements(
+        context: Context?,
+        appInfo: ApplicationInfo,
+        classLoader: ClassLoader,
+    ) {
+        val enhancements = resolveGalleryEnhancements(context, appInfo, classLoader)
         installBackupPauseDiagnostics(classLoader, enhancements)
         installBackupTemperatureCompatibility(classLoader, enhancements)
         installBackupPauseReasonText(classLoader, enhancements)
@@ -127,25 +182,42 @@ class FeiniuBridgeHook : XposedModule() {
      * cached, so a stale entry or a partially matching build degrades to a no-op.
      */
     private fun resolveGalleryEnhancements(
+        context: Context?,
         appInfo: ApplicationInfo,
         classLoader: ClassLoader,
     ): EnhancementTargets {
-        val context = currentApplication()
+        // The connection resolver stores under the device-protected context, which is readable
+        // before the user unlocks; keep the enhancement cache in the same place so both caches share
+        // one file and one lifetime.
+        val cacheContext = context?.createDeviceProtectedStorageContext()
         val fingerprint = context?.let { value ->
             runCatching { GalleryFingerprint.from(value) }.getOrNull()
         }
-        val cache = if (context != null && fingerprint != null) {
-            EnhancementResolutionCache(context, fingerprint)
+        val cache = if (cacheContext != null && fingerprint != null) {
+            EnhancementResolutionCache(cacheContext, fingerprint)
         } else {
             null
         }
+        if (cache == null) {
+            val reason = when {
+                context == null -> "no-context"
+                fingerprint == null -> "no-fingerprint"
+                else -> "no-storage-context"
+            }
+            logInfo("enhancement resolver cache=unavailable reason=$reason")
+        }
 
-        cache?.read { true }
-            ?.let { cached -> validateEnhancementTargets(cached, classLoader) }
-            ?.let { validated ->
+        val cached = cache?.read { true }
+        if (cached != null) {
+            val validated = validateEnhancementTargets(cached, classLoader)
+            if (validated != null) {
                 logInfo("enhancement resolver source=cache")
                 return validated
             }
+            logInfo("enhancement resolver cache=stale (live class loader disagrees); rescanning")
+        } else if (cache != null) {
+            logInfo("enhancement resolver cache=miss")
+        }
 
         val views = mutableListOf<io.github.colorosfeiniu.bridge.resolver.ClassView>()
         ApkDex.forEachDex(
@@ -163,7 +235,16 @@ class FeiniuBridgeHook : XposedModule() {
             pauseReasonText = null,
             diagnostics = located.diagnostics,
         )
-        if (!validated.isEmpty) cache?.write(validated)
+        if (!validated.isEmpty) {
+            if (cache != null) {
+                cache.write(validated)
+                logInfo("enhancement resolver cache=write")
+            } else {
+                logInfo("enhancement resolver cache=write skipped reason=no-cache")
+            }
+        } else {
+            logInfo("enhancement resolver cache=write skipped reason=empty-result")
+        }
         logInfo(
             "enhancement resolver source=dex-scan " +
                 "temperature=${validated.temperatureProvider?.className ?: "none"} " +

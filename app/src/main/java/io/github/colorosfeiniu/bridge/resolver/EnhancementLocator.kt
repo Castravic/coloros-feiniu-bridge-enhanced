@@ -18,6 +18,15 @@ internal data class MethodView(
     val name: String,
     val descriptor: String,
     val isStatic: Boolean,
+    /** Field accesses inside this method body, used to pin the pause-reason text producer. */
+    val fieldRefs: List<FieldRefView> = emptyList(),
+)
+
+/** A field access as the locators see it: declaring class, field name and field type descriptor. */
+internal data class FieldRefView(
+    val owner: String,
+    val name: String,
+    val type: String,
 )
 
 /** One dynamically located target: the class and one of its methods. */
@@ -54,8 +63,13 @@ internal data class EnhancementTargets(
  *   `debug.gallery.temperature.test` / `debug.gallery.temperature.level`;
  * * **pause condition checker** — the only class loading the `NasBackupCondChk` log tag and
  *   declaring `(ZZ)Lcom/oplus/gallery/.../PauseReason;` methods;
- * * **pause reason text** — the subclass of the un-obfuscated `SyncStateInfo` that declares the
- *   text-producing `(Landroid/content/Context;)Ljava/lang/String;` method.
+ * * **pause reason text** — the subclass of the un-obfuscated `SyncStateInfo` whose text-producing
+ *   `(Context)` / `(int, Context)` → `String` method reads the paused state, i.e. touches a field
+ *   typed `PauseReason` or one of the un-obfuscated `R.string.nas_backup_paused*` resources.
+ *
+ * The pause candidates are deliberately narrowed by that field trace: the loose predicate (a
+ * `SyncStateInfo` subclass with a text method) matches 14 classes / 17 methods in the 17.9.24
+ * reference APK, which is ambiguous on device and would drop the enhancement.
  *
  * Any ambiguity (no candidate, or more than one candidate that survives validation) yields no
  * target, because these hooks change backup behaviour when they misfire.
@@ -64,6 +78,8 @@ internal object EnhancementLocator {
 
     const val PAUSE_REASON_DESCRIPTOR =
         "Lcom/oplus/gallery/framework/abilities/cloudsync/nas/backup/state/PauseReason;"
+    const val NAS_STRING_RESOURCE_OWNER = "com.oplus.gallery.basebiz.R\$string"
+    const val PAUSED_STRING_RESOURCE_PREFIX = "nas_backup_paused"
     const val STATE_INFO_SUPERCLASS = "com.oplus.gallery.business_lib.cloudsync.SyncStateInfo"
     const val TEMPERATURE_TEST_FLAG = "debug.gallery.temperature.test"
     const val TEMPERATURE_LEVEL_FLAG = "debug.gallery.temperature.level"
@@ -76,11 +92,20 @@ internal object EnhancementLocator {
 
     fun locate(classes: List<ClassView>): EnhancementTargets {
         val diagnostics = mutableListOf<String>()
+        val pauseTrace = locatePauseTrace(classes)
+        if (pauseTrace.size == 1) {
+            diagnostics += "pause state info: ${pauseTrace.single().className}"
+            diagnostics += "pause reason text: ${pauseTrace.single().method.className}." +
+                pauseTrace.single().method.methodName
+        } else {
+            diagnostics += "pause state info: candidates=${pauseTrace.size}"
+            diagnostics += "pause reason text: candidates=${pauseTrace.size}"
+        }
         return EnhancementTargets(
             temperatureProvider = locateTemperatureProvider(classes, diagnostics),
             pauseConditionCheckers = locatePauseConditionCheckers(classes, diagnostics),
-            pauseStateInfoClass = locatePauseStateInfoClass(classes, diagnostics),
-            pauseReasonText = locatePauseReasonText(classes, diagnostics),
+            pauseStateInfoClass = pauseTrace.singleOrNull()?.className,
+            pauseReasonText = pauseTrace.singleOrNull()?.method,
             diagnostics = diagnostics,
         )
     }
@@ -134,45 +159,42 @@ internal object EnhancementLocator {
         return candidates
     }
 
-    private fun locatePauseStateInfoClass(
-        classes: List<ClassView>,
-        diagnostics: MutableList<String>,
-    ): String? {
-        val candidates = classes
-            .filter { clazz -> clazz.superClassName == STATE_INFO_SUPERCLASS }
-            .filter { clazz ->
-                clazz.methods.any { method ->
-                    method.descriptor == CONTEXT_TO_STRING || method.descriptor == INT_CONTEXT_TO_STRING
-                }
-            }
-        if (candidates.size != 1) {
-            diagnostics += "pause state info: candidates=${candidates.size}"
-            return null
-        }
-        diagnostics += "pause state info: ${candidates.single().className}"
-        return candidates.single().className
-    }
+    /** A pause text method together with the `SyncStateInfo` subclass that declares it. */
+    private data class PauseTrace(
+        val className: String,
+        val method: LocatedMethod,
+    )
 
-    private fun locatePauseReasonText(
-        classes: List<ClassView>,
-        diagnostics: MutableList<String>,
-    ): LocatedMethod? {
-        val candidates = classes
-            .filter { clazz -> clazz.superClassName == STATE_INFO_SUPERCLASS }
-            .flatMap { clazz ->
-                clazz.methods
-                    .filter { method ->
-                        !method.isStatic &&
-                            (method.descriptor == CONTEXT_TO_STRING ||
-                                method.descriptor == INT_CONTEXT_TO_STRING)
-                    }
-                    .map { method -> LocatedMethod(clazz.className, method.name, method.descriptor) }
-            }
-        if (candidates.size != 1) {
-            diagnostics += "pause reason text: candidates=${candidates.size}"
-            return null
+    /**
+     * The `SyncStateInfo` subclasses whose text method carries the pause trace, i.e. reads the
+     * `PauseReason` enum or the `nas_backup_paused*` string resources. The state info class and the
+     * text method share this predicate so the two targets can never disagree.
+     */
+    private fun locatePauseTrace(classes: List<ClassView>): List<PauseTrace> = classes
+        .filter { clazz -> clazz.superClassName == STATE_INFO_SUPERCLASS }
+        .flatMap { clazz ->
+            clazz.methods
+                .filter { method ->
+                    !method.isStatic &&
+                        (method.descriptor == CONTEXT_TO_STRING ||
+                            method.descriptor == INT_CONTEXT_TO_STRING) &&
+                        method.fieldRefs.any(::isPauseTrace)
+                }
+                .map { method ->
+                    PauseTrace(
+                        className = clazz.className,
+                        method = LocatedMethod(clazz.className, method.name, method.descriptor),
+                    )
+                }
         }
-        diagnostics += "pause reason text: ${candidates.single().className}"
-        return candidates.single()
-    }
+
+    /**
+     * The un-obfuscated engineering trace the pause text method leaves behind: it reads the paused
+     * state class field (`PauseReason`) or one of the `nas_backup_paused*` resource ids. Both are
+     * stable across Gallery builds while the obfuscated class names are not.
+     */
+    private fun isPauseTrace(ref: FieldRefView): Boolean =
+        ref.type == PAUSE_REASON_DESCRIPTOR ||
+            (ref.owner == NAS_STRING_RESOURCE_OWNER &&
+                ref.name.startsWith(PAUSED_STRING_RESOURCE_PREFIX))
 }
