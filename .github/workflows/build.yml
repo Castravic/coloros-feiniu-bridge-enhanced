@@ -2,7 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, c17-merge ]
   pull_request:
     branches: [ main ]
   workflow_dispatch:
