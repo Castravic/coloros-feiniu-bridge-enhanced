@@ -172,13 +172,15 @@ GitHub Actions 主线构建会额外生成：
 app/build/outputs/apk/release/app-release-signed.apk
 ```
 
-固定 release 证书 SHA-256：
+固定 release 证书 SHA-256（本 fork，自 `v0.4.0` 起）：
 
 ```text
-37653B3C5DF69F83C3BB16C6BF7ADC7BE25AD0B34EB0EDCFA27A33CD2F3EB1BD
+3EE3590746FD638AB28878856D67C363E0325310CD28C2CB3B46674FFDE1047D
 ```
 
-从 `0.1.4` 开始，正式安装和后续覆盖升级均使用该证书签名的 release APK。CI debug APK 使用临时 debug key，不作为稳定升级包。
+从 `0.4.0` 开始，正式安装和后续覆盖升级均使用该证书签名的 release APK。CI debug APK 使用临时 debug key，不作为稳定升级包。
+
+> ⚠️ 本 fork 的签名证书与上游 `Costben/coloros-feiniu-bridge`（及 `Castravic/coloros-feiniu-bridge-enhanced` 旧版 release，均为 `37653B3C…`）不同——从旧版本切换过来时需卸载后重新安装一次，并在 LSPosed 中重新启用模块；之后本 fork 的后续版本可正常覆盖升级。
 
 ## 安装
 
