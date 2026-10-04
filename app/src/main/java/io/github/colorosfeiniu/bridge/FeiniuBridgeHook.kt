@@ -1,14 +1,15 @@
 package io.github.colorosfeiniu.bridge
 
 import android.content.Context
-import de.robv.android.xposed.IXposedHookLoadPackage
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
-import de.robv.android.xposed.XposedHelpers
-import de.robv.android.xposed.callbacks.XC_LoadPackage
+import android.content.pm.ApplicationInfo
+import android.util.Log
 import io.github.colorosfeiniu.bridge.resolver.ConnectionResolutionBootstrap
 import io.github.colorosfeiniu.bridge.resolver.ResolutionSource
 import io.github.colorosfeiniu.bridge.resolver.ValidatedTokenHooks
+import io.github.libxposed.api.XposedInterface.Chain
+import io.github.libxposed.api.XposedInterface.Hooker
+import io.github.libxposed.api.XposedModule
+import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam
 import java.io.File
 import java.lang.ref.WeakReference
 import java.lang.reflect.Method
@@ -17,49 +18,158 @@ import java.lang.reflect.Proxy
 import java.util.Locale
 import java.util.zip.ZipFile
 
-class FeiniuBridgeHook : IXposedHookLoadPackage {
-    override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
-        if (lpparam.packageName != TARGET_PACKAGE) return
+/**
+ * Modern libxposed API 102 module entry point.
+ *
+ * The upstream ColorOS 17 architecture is the skeleton: [onPackageReady] resolves the token
+ * decryptor per package (Gallery + Device Space) and, for Gallery, installs the Enhanced feature
+ * set on top of the same interceptor chain.
+ */
+class FeiniuBridgeHook : XposedModule() {
 
-        log("loading for ${lpparam.packageName}/${lpparam.processName}")
+    override fun onPackageReady(param: PackageReadyParam) {
+        installLogSink { priority, tag, message, throwable ->
+            if (throwable != null) {
+                log(priority, tag, message, throwable)
+            } else {
+                log(priority, tag, message)
+            }
+        }
 
-        ConnectionResolutionBootstrap.install(
-            lpparam = lpparam,
-            tokenInstaller = { hooks, source ->
-                installResolvedTokenHooks(lpparam, hooks, source)
-            },
-            galleryInstaller = { hooks, _ ->
-                GalleryStatFallback.install(hooks)
-            },
-        )
-        installPrivateLanTlsCompatibility(lpparam)
-        installBackupPauseDiagnostics(lpparam)
-        installBackupTemperatureCompatibility(lpparam)
-        installBackupPauseReasonText(lpparam)
-        installMobileDataBackup(lpparam)
-        installMobileDataPreference(lpparam)
+        val packageName = param.packageName
+        val profile = TokenDecryptorTargets.forPackage(packageName) ?: return
+        val classLoader = param.classLoader
+        val appInfo = param.applicationInfo
+
+        val tokenTarget = runCatching {
+            TargetResolver.resolve(classLoader, appInfo, profile) { message -> logInfo(message) }
+        }.getOrElse { error ->
+            logError(
+                "token target resolution failed: ${error.javaClass.simpleName}: ${error.message}",
+                error,
+            )
+            Target(emptyList(), null, "none")
+        }.takeIf { it.methods.isNotEmpty() }
+
+        installTokenFallback(appInfo, tokenTarget, packageName)
+
+        if (packageName == GALLERY_PACKAGE) {
+            installGalleryFeatures(param, needTokenFallback = tokenTarget == null)
+        }
     }
 
-    private fun installResolvedTokenHooks(
-        lpparam: XC_LoadPackage.LoadPackageParam,
+    private fun installTokenFallback(
+        appInfo: ApplicationInfo,
+        target: Target?,
+        packageName: String,
+    ) {
+        if (target == null) {
+            logWarn("prefix fallback unavailable for $packageName")
+            return
+        }
+        runCatching {
+            target.methods.forEach { method ->
+                method.isAccessible = true
+                hook(method).intercept { chain -> interceptPrefixCall(chain, appInfo) }
+            }
+            logInfo("installed for $packageName class=${target.className} via=${target.source}")
+        }.onFailure { error ->
+            logError("install failed: ${error.javaClass.simpleName}: ${error.message}", error)
+        }
+    }
+
+    private fun installGalleryFeatures(param: PackageReadyParam, needTokenFallback: Boolean) {
+        val classLoader = param.classLoader
+        val appInfo = param.applicationInfo
+
+        runCatching {
+            ConnectionResolutionBootstrap.install(
+                module = this,
+                classLoader = classLoader,
+                needToken = needTokenFallback,
+                needGallery = true,
+                logger = { message -> logInfo(message) },
+                tokenInstaller = { hooks, source ->
+                    installEnhancedTokenHooks(appInfo, hooks, source)
+                },
+                galleryInstaller = { hooks, _ ->
+                    GalleryStatFallback.install(this, hooks) { message -> logInfo(message) }
+                },
+            )
+        }.onFailure { error ->
+            logError(
+                "gallery resolver install failed: ${error.javaClass.simpleName}: ${error.message}",
+                error,
+            )
+        }
+
+        installPrivateLanTlsCompatibility(classLoader)
+        installBackupPauseDiagnostics(classLoader)
+        installBackupTemperatureCompatibility(classLoader)
+        installBackupPauseReasonText(classLoader)
+        installMobileDataBackup(classLoader)
+        installMobileDataPreference(classLoader)
+    }
+
+    /**
+     * Enhanced resolver fallback for the token decryptor: only reached when the upstream
+     * known-name/shape resolver did not confirm a target.
+     */
+    private fun installEnhancedTokenHooks(
+        appInfo: ApplicationInfo,
         hooks: ValidatedTokenHooks,
         source: ResolutionSource,
     ) {
-        XposedBridge.hookMethod(hooks.prefix, PrefixFallbackHook(lpparam))
-        XposedBridge.hookMethod(hooks.decrypt, TokenDecryptionDiagnosticHook)
-        log("prefix fallback installed source=${source.name.lowercase()}")
-        log("token decryption diagnostics installed methods=1")
+        hooks.prefix.isAccessible = true
+        hook(hooks.prefix).intercept { chain -> interceptPrefixCall(chain, appInfo) }
+        hooks.decrypt.isAccessible = true
+        hook(hooks.decrypt).intercept(TokenDecryptionDiagnosticHook)
+        logInfo("prefix fallback installed source=${source.name.lowercase()}")
+        logInfo("token decryption diagnostics installed methods=1")
     }
 
-    private fun installPrivateLanTlsCompatibility(
-        lpparam: XC_LoadPackage.LoadPackageParam,
-    ) {
+    private fun interceptPrefixCall(chain: Chain, appInfo: ApplicationInfo): Any? {
+        val result = runCatching { chain.proceed() }
+        val error = result.exceptionOrNull()
+        // An Error says the process itself is in trouble; only the loader's own failures fall back.
+        if (error is Error) throw error
+
+        val decision = PrefixFallbackDecision.decide(
+            returned = result.getOrNull(),
+            error = error,
+            fallback = { PrefixResolver.resolve(appInfo) { message -> logInfo(message) } },
+        )
+
+        return when (decision) {
+            is PrefixFallbackDecision.Outcome.Passthrough -> decision.value
+            is PrefixFallbackDecision.Outcome.Supply -> {
+                logLoaderThrow(error)
+                if (shouldLogFallback()) {
+                    val prefix = decision.prefix
+                    logInfo(
+                        "prefix fallback supplied source=${prefix.source} len=${prefix.value.length}",
+                    )
+                }
+                decision.prefix.value
+            }
+            is PrefixFallbackDecision.Outcome.Rethrow -> {
+                logLoaderThrow(decision.error)
+                logWarn("prefix fallback unavailable")
+                throw decision.error
+            }
+        }
+    }
+
+    private fun logLoaderThrow(error: Throwable?) {
+        if (error == null || !shouldLogThrow()) return
+        logWarn("prefix loader threw ${error.javaClass.simpleName}: ${error.message}", error)
+    }
+
+    private fun installPrivateLanTlsCompatibility(classLoader: ClassLoader) {
         runCatching {
-            val tlsSelectorClass = runCatching {
-                XposedHelpers.findClass(PRIVATE_LAN_TLS_CLASS, lpparam.classLoader)
-            }.getOrNull()
+            val tlsSelectorClass = BridgeReflect.findClassOrNull(PRIVATE_LAN_TLS_CLASS, classLoader)
             if (tlsSelectorClass == null) {
-                log("private LAN TLS compatibility unavailable")
+                logInfo("private LAN TLS compatibility unavailable")
                 return@runCatching
             }
             val methods = tlsSelectorClass.declaredMethods.filter { method ->
@@ -70,29 +180,26 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
             }
             methods.forEach { method ->
                 method.isAccessible = true
-                XposedBridge.hookMethod(method, PrivateLanTlsCompatibilityHook)
+                hook(method).intercept(PrivateLanTlsCompatibilityHook)
             }
 
             if (methods.isEmpty()) {
-                log("private LAN TLS compatibility unavailable")
+                logInfo("private LAN TLS compatibility unavailable")
             } else {
-                log("private LAN TLS compatibility installed")
+                logInfo("private LAN TLS compatibility installed")
             }
         }.onFailure { error ->
-            log(
+            logInfo(
                 "private LAN TLS compatibility install failed: " +
                     "${error.javaClass.simpleName}: ${error.message}",
             )
         }
     }
 
-    private fun installBackupPauseDiagnostics(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun installBackupPauseDiagnostics(classLoader: ClassLoader) {
         runCatching {
-            val pauseReason = XposedHelpers.findClass(
-                BACKUP_PAUSE_REASON_CLASS,
-                lpparam.classLoader,
-            )
-            val methods = loadExistingClasses(lpparam.classLoader, BACKUP_CONDITION_CHECKER_CLASSES)
+            val pauseReason = Class.forName(BACKUP_PAUSE_REASON_CLASS, false, classLoader)
+            val methods = loadExistingClasses(classLoader, BACKUP_CONDITION_CHECKER_CLASSES)
                 .flatMap { candidate ->
                     candidate.type.declaredMethods.filter { method ->
                         method.name == BACKUP_CONDITION_METHOD &&
@@ -104,30 +211,26 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
                 }
             methods.forEach { method ->
                 method.isAccessible = true
-                XposedBridge.hookMethod(method, BackupPauseReasonHook)
+                hook(method).intercept(BackupPauseReasonHook)
             }
 
             if (methods.isEmpty()) {
-                log("backup pause diagnostics unavailable")
+                logInfo("backup pause diagnostics unavailable")
             } else {
-                log("backup pause diagnostics installed")
+                logInfo("backup pause diagnostics installed")
             }
         }.onFailure { error ->
-            log("backup pause diagnostics install failed: ${error.javaClass.simpleName}: ${error.message}")
+            logInfo("backup pause diagnostics install failed: ${error.javaClass.simpleName}: ${error.message}")
         }
     }
 
-    private fun installBackupTemperatureCompatibility(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun installBackupTemperatureCompatibility(classLoader: ClassLoader) {
         runCatching {
-            val pauseReason = XposedHelpers.findClass(
-                BACKUP_PAUSE_REASON_CLASS,
-                lpparam.classLoader,
-            )
-            CloudBackupTemperaturePolicy.activityLifecycleClass = runCatching {
-                XposedHelpers.findClass(ACTIVITY_LIFECYCLE_CLASS, lpparam.classLoader)
-            }.getOrNull()
+            val pauseReason = Class.forName(BACKUP_PAUSE_REASON_CLASS, false, classLoader)
+            CloudBackupTemperaturePolicy.activityLifecycleClass =
+                BridgeReflect.findClassOrNull(ACTIVITY_LIFECYCLE_CLASS, classLoader)
 
-            val conditionMethods = loadExistingClasses(lpparam.classLoader, BACKUP_CONDITION_CHECKER_CLASSES)
+            val conditionMethods = loadExistingClasses(classLoader, BACKUP_CONDITION_CHECKER_CLASSES)
                 .flatMap { candidate ->
                     candidate.type.declaredMethods.filter { method ->
                         method.name == RAW_BACKUP_CONDITION_METHOD &&
@@ -137,7 +240,7 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
                             )
                     }
                 }
-            val temperatureMethods = loadExistingClasses(lpparam.classLoader, TEMPERATURE_UTIL_CLASSES)
+            val temperatureMethods = loadExistingClasses(classLoader, TEMPERATURE_UTIL_CLASSES)
                 .flatMap { candidate ->
                     candidate.type.declaredMethods.filter { method ->
                         method.name == TEMPERATURE_METHOD &&
@@ -148,17 +251,17 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
 
             conditionMethods.forEach { method ->
                 method.isAccessible = true
-                XposedBridge.hookMethod(method, BackupConditionEvaluationScopeHook)
+                hook(method).intercept(BackupConditionEvaluationScopeHook)
             }
             temperatureMethods.forEach { method ->
                 method.isAccessible = true
-                XposedBridge.hookMethod(method, RelaxBackupTemperatureHook)
+                hook(method).intercept(RelaxBackupTemperatureHook)
             }
 
             if (conditionMethods.isEmpty() || temperatureMethods.isEmpty()) {
-                log("backup temperature compatibility unavailable")
+                logInfo("backup temperature compatibility unavailable")
             } else {
-                log(
+                logInfo(
                     "backup temperature compatibility installed " +
                         "foregroundMax=${CLOUD_FOREGROUND_MAX_TEMPERATURE_C}C " +
                         "backgroundMax=${CLOUD_BACKGROUND_MAX_TEMPERATURE_C}C " +
@@ -166,13 +269,13 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
                 )
             }
         }.onFailure { error ->
-            log("backup temperature compatibility install failed: ${error.javaClass.simpleName}: ${error.message}")
+            logInfo("backup temperature compatibility install failed: ${error.javaClass.simpleName}: ${error.message}")
         }
     }
 
-    private fun installBackupPauseReasonText(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun installBackupPauseReasonText(classLoader: ClassLoader) {
         runCatching {
-            val methods = loadExistingClasses(lpparam.classLoader, NAS_BACKUP_STATE_INFO_CLASSES)
+            val methods = loadExistingClasses(classLoader, NAS_BACKUP_STATE_INFO_CLASSES)
                 .flatMap { candidate ->
                     candidate.type.declaredMethods.filter { method ->
                         !Modifier.isStatic(method.modifiers) &&
@@ -182,25 +285,25 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
                 }
             methods.forEach { method ->
                 method.isAccessible = true
-                XposedBridge.hookMethod(method, BackupPauseReasonTextHook)
+                hook(method).intercept(BackupPauseReasonTextHook)
             }
 
             if (methods.isEmpty()) {
-                log("backup pause reason text unavailable")
+                logInfo("backup pause reason text unavailable")
             } else {
-                log("backup pause reason text installed")
+                logInfo("backup pause reason text installed")
             }
         }.onFailure { error ->
-            log("backup pause reason text install failed: ${error.javaClass.simpleName}: ${error.message}")
+            logInfo("backup pause reason text install failed: ${error.javaClass.simpleName}: ${error.message}")
         }
     }
 
-    private fun installMobileDataBackup(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun installMobileDataBackup(classLoader: ClassLoader) {
         runCatching {
-            val networkMonitor = XposedHelpers.findClass(NETWORK_MONITOR_CLASS, lpparam.classLoader)
+            val networkMonitor = Class.forName(NETWORK_MONITOR_CLASS, false, classLoader)
             MobileDataBackupPolicy.networkMonitorClass = networkMonitor
             val conditionObserverHooks = loadExistingClasses(
-                lpparam.classLoader,
+                classLoader,
                 NAS_BACKUP_CONDITION_OBSERVER_CLASSES,
             ).mapNotNull { candidate ->
                 val refreshMethod = candidate.type.declaredMethods.firstOrNull { method ->
@@ -210,10 +313,9 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
                             arrayOf(Boolean::class.javaPrimitiveType),
                         )
                 }?.apply { isAccessible = true } ?: return@mapNotNull null
-                XposedBridge.hookAllConstructors(
-                    candidate.type,
-                    RememberConditionObserverHook(refreshMethod),
-                )
+                BridgeReflect.allConstructors(candidate.type).forEach { constructor ->
+                    hook(constructor).intercept(RememberConditionObserverHook(refreshMethod))
+                }
                 candidate
             }
 
@@ -225,11 +327,11 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
             }
             wlanMethods.forEach { method ->
                 method.isAccessible = true
-                XposedBridge.hookMethod(method, AllowValidatedMobileNetworkHook)
+                hook(method).intercept(AllowValidatedMobileNetworkHook)
             }
 
             val notificationConditionMethods = loadExistingClasses(
-                lpparam.classLoader,
+                classLoader,
                 NAS_NOTIFICATION_CONDITION_CLASSES,
             ).flatMap { candidate ->
                 candidate.type.declaredMethods.filter { method ->
@@ -240,117 +342,168 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
             }
             notificationConditionMethods.forEach { method ->
                 method.isAccessible = true
-                XposedBridge.hookMethod(method, MobileNetworkEvaluationScopeHook)
+                hook(method).intercept(MobileNetworkEvaluationScopeHook)
             }
 
             if (wlanMethods.isEmpty() || notificationConditionMethods.isEmpty() || conditionObserverHooks.isEmpty()) {
-                log("mobile data backup compatibility partially unavailable")
+                logInfo("mobile data backup compatibility partially unavailable")
             } else {
-                log("mobile data backup compatibility installed")
+                logInfo("mobile data backup compatibility installed")
             }
         }.onFailure { error ->
-            log("mobile data backup compatibility install failed: ${error.javaClass.simpleName}: ${error.message}")
+            logInfo("mobile data backup compatibility install failed: ${error.javaClass.simpleName}: ${error.message}")
         }
     }
 
-    private fun installMobileDataPreference(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun installMobileDataPreference(classLoader: ClassLoader) {
         runCatching {
-            val settingsFragment = XposedHelpers.findClass(SETTINGS_FRAGMENT_CLASS, lpparam.classLoader)
-            XposedBridge.hookAllMethods(
-                settingsFragment,
-                SETTINGS_CREATE_PREFERENCES_METHOD,
-                AddMobileDataPreferenceHook(lpparam.classLoader),
-            )
-            log("mobile data backup preference hook installed")
+            val settingsFragment = Class.forName(SETTINGS_FRAGMENT_CLASS, false, classLoader)
+            BridgeReflect.allMethodsNamed(settingsFragment, SETTINGS_CREATE_PREFERENCES_METHOD)
+                .forEach { method ->
+                    hook(method).intercept(AddMobileDataPreferenceHook(classLoader))
+                }
+            logInfo("mobile data backup preference hook installed")
         }.onFailure { error ->
-            log("mobile data backup preference hook failed: ${error.javaClass.simpleName}: ${error.message}")
+            logInfo("mobile data backup preference hook failed: ${error.javaClass.simpleName}: ${error.message}")
         }
     }
 
-    private object BackupPauseReasonHook : XC_MethodHook() {
-        override fun afterHookedMethod(param: MethodHookParam) {
-            val state = if (param.hasThrowable()) {
-                "ERROR:${param.throwable.javaClass.simpleName}"
-            } else {
-                param.result?.toString() ?: "NONE"
+    private object PrivateLanTlsCompatibilityHook : Hooker {
+        override fun intercept(chain: Chain): Any? {
+            val original = chain.proceed()
+            val address = chain.getArg(0) as? String
+            if (
+                !PrivateLanTlsPolicy.shouldUseCompatibility(
+                    originalResult = original as? Boolean,
+                    hasThrowable = false,
+                    address = address,
+                )
+            ) {
+                return original
             }
 
-            synchronized(BackupPauseReasonHook::class.java) {
+            if (shouldLogActivation()) {
+                logInfo("private LAN TLS compatibility activated")
+            }
+            return true
+        }
+
+        private fun shouldLogActivation(): Boolean {
+            if (activationLogged) return false
+            return synchronized(this) {
+                if (activationLogged) {
+                    false
+                } else {
+                    activationLogged = true
+                    true
+                }
+            }
+        }
+
+        @Volatile
+        private var activationLogged = false
+    }
+
+    private object BackupPauseReasonHook : Hooker {
+        override fun intercept(chain: Chain): Any? {
+            val result: Any?
+            try {
+                result = chain.proceed()
+            } catch (throwable: Throwable) {
+                logState("ERROR:${throwable.javaClass.simpleName}")
+                throw throwable
+            }
+
+            logState(result?.toString() ?: "NONE")
+            return result
+        }
+
+        private fun logState(state: String) {
+            synchronized(this) {
                 if (state == lastState) return
                 lastState = state
             }
-            log("backup pause state=$state")
+            logInfo("backup pause state=$state")
         }
 
         @Volatile
         private var lastState: String? = null
     }
 
-    private object BackupConditionEvaluationScopeHook : XC_MethodHook() {
-        override fun beforeHookedMethod(param: MethodHookParam) {
+    private object BackupConditionEvaluationScopeHook : Hooker {
+        override fun intercept(chain: Chain): Any? {
             backupConditionEvaluationDepth.set((backupConditionEvaluationDepth.get() ?: 0) + 1)
             mobileNetworkEvaluationDepth.set((mobileNetworkEvaluationDepth.get() ?: 0) + 1)
-            backupConditionForeground.set(param.args.getOrNull(1) as? Boolean)
-        }
-
-        override fun afterHookedMethod(param: MethodHookParam) {
-            val remaining = (backupConditionEvaluationDepth.get() ?: 0) - 1
-            if (remaining <= 0) {
-                backupConditionEvaluationDepth.remove()
-                backupConditionForeground.remove()
-            } else {
-                backupConditionEvaluationDepth.set(remaining)
+            backupConditionForeground.set(chain.getArg(1) as? Boolean)
+            try {
+                return chain.proceed()
+            } finally {
+                val remaining = (backupConditionEvaluationDepth.get() ?: 0) - 1
+                if (remaining <= 0) {
+                    backupConditionEvaluationDepth.remove()
+                    backupConditionForeground.remove()
+                } else {
+                    backupConditionEvaluationDepth.set(remaining)
+                }
+                leaveMobileNetworkEvaluationScope()
             }
-            leaveMobileNetworkEvaluationScope()
         }
     }
 
-    private object MobileNetworkEvaluationScopeHook : XC_MethodHook() {
-        override fun beforeHookedMethod(param: MethodHookParam) {
+    private object MobileNetworkEvaluationScopeHook : Hooker {
+        override fun intercept(chain: Chain): Any? {
             mobileNetworkEvaluationDepth.set((mobileNetworkEvaluationDepth.get() ?: 0) + 1)
-        }
-
-        override fun afterHookedMethod(param: MethodHookParam) {
-            leaveMobileNetworkEvaluationScope()
+            try {
+                return chain.proceed()
+            } finally {
+                leaveMobileNetworkEvaluationScope()
+            }
         }
     }
 
-    private object AllowValidatedMobileNetworkHook : XC_MethodHook() {
-        override fun afterHookedMethod(param: MethodHookParam) {
-            if (param.hasThrowable() || param.result == true) return
-            if ((mobileNetworkEvaluationDepth.get() ?: 0) <= 0) return
-            if (!MobileDataBackupPolicy.isEnabled()) return
-            if (!MobileDataBackupPolicy.isValidatedMobileNetwork()) return
+    private object AllowValidatedMobileNetworkHook : Hooker {
+        override fun intercept(chain: Chain): Any? {
+            val result = chain.proceed()
+            if (result == true) return result
+            if ((mobileNetworkEvaluationDepth.get() ?: 0) <= 0) return result
+            if (!MobileDataBackupPolicy.isEnabled()) return result
+            if (!MobileDataBackupPolicy.isValidatedMobileNetwork()) return result
 
-            param.result = true
             MobileDataBackupPolicy.logUseOnce()
+            return true
         }
     }
 
     private class RememberConditionObserverHook(
         private val refreshMethod: Method,
-    ) : XC_MethodHook() {
-        override fun afterHookedMethod(param: MethodHookParam) {
-            MobileDataBackupPolicy.rememberConditionObserver(param.thisObject, refreshMethod)
+    ) : Hooker {
+        override fun intercept(chain: Chain): Any? {
+            val result = chain.proceed()
+            MobileDataBackupPolicy.rememberConditionObserver(chain.getThisObject(), refreshMethod)
+            return result
         }
     }
 
-    private object RelaxBackupTemperatureHook : XC_MethodHook() {
-        override fun afterHookedMethod(param: MethodHookParam) {
-            if (param.hasThrowable() || (backupConditionEvaluationDepth.get() ?: 0) <= 0) return
+    private object RelaxBackupTemperatureHook : Hooker {
+        override fun intercept(chain: Chain): Any? {
+            val result = chain.proceed()
+            if ((backupConditionEvaluationDepth.get() ?: 0) <= 0) return result
 
-            val actualTemperature = param.result as? Float ?: return
+            val actualTemperature = result as? Float ?: return result
             val decision = CloudBackupTemperaturePolicy.evaluate(actualTemperature)
-            if (decision.allow && actualTemperature > ORIGINAL_BACKUP_TEMPERATURE_C) {
-                param.result = ORIGINAL_BACKUP_TEMPERATURE_C
+            val newResult = if (decision.allow && actualTemperature > ORIGINAL_BACKUP_TEMPERATURE_C) {
+                ORIGINAL_BACKUP_TEMPERATURE_C
+            } else {
+                result
             }
             if (CloudBackupTemperaturePolicy.shouldLog(decision)) {
-                log(
+                logInfo(
                     "backup temperature policy actual=${actualTemperature}C " +
                         "foreground=${decision.foreground} max=${decision.maxTemperature}C " +
                         "retry=${CLOUD_RETRY_TEMPERATURE_C}C allow=${decision.allow}",
                 )
             }
+            return newResult
         }
     }
 
@@ -363,10 +516,10 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
 
         fun evaluate(actualTemperature: Float): TemperatureDecision {
             val foreground = backupConditionForeground.get() ?: runCatching {
-                XposedHelpers.callStaticMethod(
-                    activityLifecycleClass,
-                    ACTIVITY_FOREGROUND_METHOD,
-                ) as Boolean
+                val method = activityLifecycleClass?.declaredMethods?.firstOrNull {
+                    it.name == ACTIVITY_FOREGROUND_METHOD && it.parameterTypes.isEmpty()
+                }
+                method?.apply { isAccessible = true }?.invoke(null) as Boolean
             }.getOrDefault(false)
             val maxTemperature = if (foreground) {
                 CLOUD_FOREGROUND_MAX_TEMPERATURE_C
@@ -417,72 +570,75 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
         val allow: Boolean,
     )
 
-    private object BackupPauseReasonTextHook : XC_MethodHook() {
-        override fun afterHookedMethod(param: MethodHookParam) {
-            if (param.hasThrowable()) return
-            val context = param.args.firstOrNull() as? Context ?: return
+    private object BackupPauseReasonTextHook : Hooker {
+        override fun intercept(chain: Chain): Any? {
+            val result = chain.proceed()
+            val context = chain.getArg(0) as? Context ?: return result
             MobileDataBackupPolicy.rememberContext(context)
 
             val backupState = runCatching {
-                XposedHelpers.getObjectField(param.thisObject, NAS_BACKUP_STATE_FIELD)
-            }.getOrNull() ?: return
-            if (backupState.javaClass.name !in NAS_PAUSED_STATE_CLASSES) return
+                BridgeReflect.getObjectField(chain.getThisObject(), NAS_BACKUP_STATE_FIELD)
+            }.getOrNull() ?: return result
+            if (backupState.javaClass.name !in NAS_PAUSED_STATE_CLASSES) return result
 
-            val reason = findPauseReason(backupState) ?: return
-            val text = resolvePauseReasonText(context, reason) ?: return
-            param.result = text
+            val reason = findPauseReason(backupState) ?: return result
+            val text = resolvePauseReasonText(context, reason) ?: return result
+            return text
         }
     }
 
     private class AddMobileDataPreferenceHook(
         private val classLoader: ClassLoader,
-    ) : XC_MethodHook() {
-        override fun afterHookedMethod(param: MethodHookParam) {
-            val fragment = param.thisObject ?: return
-            val context = XposedHelpers.callMethod(fragment, "getContext") as? Context ?: return
+    ) : Hooker {
+        override fun intercept(chain: Chain): Any? {
+            val result = chain.proceed()
+            val fragment = chain.getThisObject() ?: return result
+            val context = runCatching {
+                BridgeReflect.callMethod(fragment, "getContext") as? Context
+            }.getOrNull() ?: return result
             MobileDataBackupPolicy.rememberContext(context)
 
-            val existing = XposedHelpers.callMethod(
+            val existing = BridgeReflect.callMethod(
                 fragment,
                 "findPreference",
                 MOBILE_DATA_PREFERENCE_KEY,
             )
-            if (existing != null) return
+            if (existing != null) return result
 
-            val nasPreference = XposedHelpers.callMethod(
+            val nasPreference = BridgeReflect.callMethod(
                 fragment,
                 "findPreference",
                 NAS_BACKUP_PREFERENCE_KEY,
-            ) ?: return
+            ) ?: return result
             val visible = runCatching {
-                XposedHelpers.callMethod(nasPreference, "isVisible") as Boolean
+                BridgeReflect.callMethod(nasPreference, "isVisible") as Boolean
             }.getOrDefault(true)
-            if (!visible) return
+            if (!visible) return result
 
-            val category = XposedHelpers.callMethod(
+            val category = BridgeReflect.callMethod(
                 fragment,
                 "findPreference",
                 CLOUD_SYNC_CATEGORY_KEY,
-            ) ?: return
-            val switchClass = XposedHelpers.findClass(COUI_SWITCH_PREFERENCE_CLASS, classLoader)
-            val preference = XposedHelpers.newInstance(switchClass, context)
-            XposedHelpers.callMethod(preference, "setKey", MOBILE_DATA_PREFERENCE_KEY)
-            XposedHelpers.callMethod(preference, "setTitle", mobileDataPreferenceTitle(context))
-            XposedHelpers.callMethod(preference, "setSummary", mobileDataPreferenceSummary(context))
-            XposedHelpers.callMethod(preference, "setPersistent", false)
+            ) ?: return result
+            val switchClass = Class.forName(COUI_SWITCH_PREFERENCE_CLASS, false, classLoader)
+            val preference = BridgeReflect.newInstance(switchClass, context)
+            BridgeReflect.callMethod(preference, "setKey", MOBILE_DATA_PREFERENCE_KEY)
+            BridgeReflect.callMethod(preference, "setTitle", mobileDataPreferenceTitle(context))
+            BridgeReflect.callMethod(preference, "setSummary", mobileDataPreferenceSummary(context))
+            BridgeReflect.callMethod(preference, "setPersistent", false)
             val mobileDataEnabled = MobileDataBackupPolicy.isEnabled(context)
-            XposedHelpers.callMethod(preference, "setChecked", mobileDataEnabled)
-            XposedHelpers.callMethod(
+            BridgeReflect.callMethod(preference, "setChecked", mobileDataEnabled)
+            BridgeReflect.callMethod(
                 nasPreference,
                 "setSummary",
                 nasBackupNetworkSummary(mobileDataEnabled, context),
             )
             val order = runCatching {
-                XposedHelpers.callMethod(nasPreference, "getOrder") as Int
+                BridgeReflect.callMethod(nasPreference, "getOrder") as Int
             }.getOrDefault(Int.MAX_VALUE - 2)
-            XposedHelpers.callMethod(preference, "setOrder", order + 1)
+            BridgeReflect.callMethod(preference, "setOrder", order + 1)
 
-            val listenerClass = XposedHelpers.findClass(PREFERENCE_CHANGE_LISTENER_CLASS, classLoader)
+            val listenerClass = Class.forName(PREFERENCE_CHANGE_LISTENER_CLASS, false, classLoader)
             val listener = Proxy.newProxyInstance(
                 classLoader,
                 arrayOf(listenerClass),
@@ -491,7 +647,7 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
                     "onPreferenceChange" -> {
                         val enabled = args?.getOrNull(1) as? Boolean ?: false
                         MobileDataBackupPolicy.setEnabled(context, enabled)
-                        XposedHelpers.callMethod(
+                        BridgeReflect.callMethod(
                             nasPreference,
                             "setSummary",
                             nasBackupNetworkSummary(enabled, context),
@@ -506,9 +662,13 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
                     else -> null
                 }
             }
-            XposedHelpers.callMethod(preference, "setOnPreferenceChangeListener", listener)
-            XposedHelpers.callMethod(category, "addPreference", preference)
-            log("mobile data backup preference added enabled=${MobileDataBackupPolicy.isEnabled(context)}")
+            BridgeReflect.callMethod(preference, "setOnPreferenceChangeListener", listener)
+            BridgeReflect.callMethod(category, "addPreference", preference)
+            logInfo(
+                "mobile data backup preference added enabled=" +
+                    "${MobileDataBackupPolicy.isEnabled(context)}",
+            )
+            return result
         }
     }
 
@@ -548,7 +708,7 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
                 .putBoolean(MOBILE_DATA_PREFERENCE_KEY, enabled)
                 .apply()
             useLogged = false
-            log("mobile data backup preference changed enabled=$enabled")
+            logInfo("mobile data backup preference changed enabled=$enabled")
         }
 
         fun rememberConditionObserver(value: Any, refreshMethod: Method) {
@@ -560,15 +720,15 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
             val observer = conditionObserver.get()
             val refreshMethod = conditionRefreshMethod
             if (observer == null || refreshMethod == null) {
-                log("mobile data backup condition refresh unavailable")
+                logInfo("mobile data backup condition refresh unavailable")
                 return
             }
             runCatching {
                 refreshMethod.invoke(observer, true)
             }.onSuccess {
-                log("mobile data backup condition refresh requested")
+                logInfo("mobile data backup condition refresh requested")
             }.onFailure { error ->
-                log(
+                logInfo(
                     "mobile data backup condition refresh failed: " +
                         "${error.javaClass.simpleName}: ${error.message}",
                 )
@@ -578,7 +738,7 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
         fun isValidatedMobileNetwork(): Boolean {
             val monitor = networkMonitorClass ?: return false
             return runCatching {
-                XposedHelpers.callStaticMethod(monitor, MOBILE_VALIDATED_METHOD) as Boolean
+                BridgeReflect.callStaticMethod(monitor, MOBILE_VALIDATED_METHOD) as Boolean
             }.getOrDefault(false)
         }
 
@@ -588,66 +748,38 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
                 if (useLogged) return
                 useLogged = true
             }
-            log("validated mobile network accepted for NAS backup")
+            logInfo("validated mobile network accepted for NAS backup")
         }
     }
 
-    private class PrefixFallbackHook(
-        private val lpparam: XC_LoadPackage.LoadPackageParam,
-    ) : XC_MethodHook() {
-        override fun afterHookedMethod(param: MethodHookParam) {
-            if (param.hasThrowable()) return
-            if (!param.result.isNullOrBlankString()) return
-
-            val resolved = PrefixResolver.resolve(lpparam)
-            if (resolved == null) {
-                log("prefix fallback unavailable")
-                return
+    private object TokenDecryptionDiagnosticHook : Hooker {
+        override fun intercept(chain: Chain): Any? {
+            val returned: Any?
+            try {
+                returned = chain.proceed()
+            } catch (throwable: Throwable) {
+                logEvent("token decrypt result=error type=${throwable.javaClass.simpleName}", chain)
+                throw throwable
             }
 
-            param.result = resolved.value
-            if (shouldLogFallback()) {
-                log("prefix fallback supplied source=${resolved.source} len=${resolved.value.length}")
-            }
-        }
-
-        private fun shouldLogFallback(): Boolean {
-            return !fallbackLogged && synchronized(PrefixFallbackHook::class.java) {
-                if (fallbackLogged) {
-                    false
-                } else {
-                    fallbackLogged = true
-                    true
-                }
-            }
-        }
-
-        companion object {
-            @Volatile
-            private var fallbackLogged = false
-        }
-    }
-
-    private object TokenDecryptionDiagnosticHook : XC_MethodHook() {
-        override fun afterHookedMethod(param: MethodHookParam) {
-            val event = if (param.hasThrowable()) {
-                "token decrypt result=error type=${param.throwable.javaClass.simpleName}"
+            val value = returned as? String
+            val event = if (value.isNullOrBlank()) {
+                "token decrypt result=empty"
             } else {
-                val value = param.result as? String
-                if (value.isNullOrBlank()) {
-                    "token decrypt result=empty"
-                } else {
-                    "token decrypt result=success len=${value.length}"
-                }
+                "token decrypt result=success len=${value.length}"
             }
+            logEvent(event, chain)
+            return returned
+        }
 
+        private fun logEvent(event: String, chain: Chain) {
             val eventNumber = synchronized(this) {
                 if (loggedEventCount >= MAX_TOKEN_DECRYPT_DIAGNOSTIC_EVENTS) return
                 loggedEventCount += 1
                 loggedEventCount
             }
-            log(
-                "$event class=${param.method.declaringClass.name} " +
+            logInfo(
+                "$event class=${chain.getExecutable().declaringClass.name} " +
                     "event=$eventNumber/$MAX_TOKEN_DECRYPT_DIAGNOSTIC_EVENTS",
             )
         }
@@ -655,76 +787,149 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
         private var loggedEventCount = 0
     }
 
-    private object PrivateLanTlsCompatibilityHook : XC_MethodHook() {
-        override fun afterHookedMethod(param: MethodHookParam) {
-            val address = param.args.firstOrNull() as? String
-            if (
-                !PrivateLanTlsPolicy.shouldUseCompatibility(
-                    originalResult = param.result as? Boolean,
-                    hasThrowable = param.hasThrowable(),
-                    address = address,
-                )
-            ) {
-                return
-            }
+    /**
+     * Locates the prefix loader to hook for one target profile.
+     *
+     * A known class is accepted immediately only when its full method contract is confirmed. If
+     * none qualify, structural DEX discovery runs before the name-only fallback kept for legacy
+     * Gallery builds that expose the prefix loader but not the newer decrypt entry point.
+     */
+    private object TargetResolver {
 
-            param.result = true
-            if (shouldLogActivation()) {
-                log("private LAN TLS compatibility activated")
-            }
+        fun resolve(
+            classLoader: ClassLoader,
+            appInfo: ApplicationInfo,
+            profile: TokenDecryptorProfile,
+            logger: (String) -> Unit,
+        ): Target {
+            val knownCandidates = profile.classNames
+                .mapNotNull { className -> findClass(className, classLoader) }
+            val resolved = TokenDecryptorTargetResolver.resolve(
+                knownCandidates,
+                hasPrefixLoader = { prefixMethodsOf(it, profile).isNotEmpty() },
+                hasDecryptEntryPoint = { declaresDecryptEntryPoint(it, profile) },
+                locateByShape = { resolveClassByShape(classLoader, appInfo, profile, logger) },
+            ) ?: return Target(emptyList(), null, "none")
+
+            return Target(
+                prefixMethodsOf(resolved.target, profile),
+                resolved.target.name,
+                resolved.source.logValue,
+            )
         }
 
-        private fun shouldLogActivation(): Boolean {
-            if (activationLogged) return false
-            return synchronized(this) {
-                if (activationLogged) {
-                    false
-                } else {
-                    activationLogged = true
-                    true
+        private fun resolveClassByShape(
+            classLoader: ClassLoader,
+            appInfo: ApplicationInfo,
+            profile: TokenDecryptorProfile,
+            logger: (String) -> Unit,
+        ): Class<*>? {
+            val className = ApkDex.scan(appInfo, logger) { bytes ->
+                TokenDecryptorLocator.locate(bytes, profile)
+            }
+            if (className == null) {
+                logger("dex scan did not find a token decryptor class for ${profile.packageName}")
+                return null
+            }
+
+            val clazz = findClass(className, classLoader)
+            if (clazz == null) {
+                logger("dex scan matched $className but it is not loadable")
+                return null
+            }
+
+            val methods = prefixMethodsOf(clazz, profile)
+            if (methods.isEmpty()) return null
+            return clazz
+        }
+
+        private fun findClass(className: String, classLoader: ClassLoader): Class<*>? =
+            runCatching { Class.forName(className, false, classLoader) }.getOrNull()
+
+        private fun prefixMethodsOf(
+            clazz: Class<*>,
+            profile: TokenDecryptorProfile,
+        ): List<Method> =
+            runCatching {
+                clazz.declaredMethods.filter { method ->
+                    profile.matchesPrefixLoader(method.name) &&
+                        method.returnType == String::class.java &&
+                        method.parameterTypes.isEmpty()
                 }
-            }
-        }
+            }.getOrDefault(emptyList())
 
-        @Volatile
-        private var activationLogged = false
+        private fun declaresDecryptEntryPoint(
+            clazz: Class<*>,
+            profile: TokenDecryptorProfile,
+        ): Boolean =
+            runCatching {
+                clazz.declaredMethods.any { method ->
+                    profile.matchesDecryptEntryPoint(method.name) &&
+                        method.returnType == String::class.java &&
+                        method.parameterTypes.size == 2 &&
+                        method.parameterTypes.all { it == String::class.java }
+                }
+            }.getOrDefault(false)
     }
+
+    private class Target(
+        val methods: List<Method>,
+        val className: String?,
+        val source: String,
+    )
 
     private object PrefixResolver {
         @Volatile
         private var cachedPrefix: ResolvedPrefix? = null
 
-        fun resolve(lpparam: XC_LoadPackage.LoadPackageParam): ResolvedPrefix? {
+        fun resolve(appInfo: ApplicationInfo, logger: (String) -> Unit): ResolvedPrefix? {
             cachedPrefix?.let { return it }
 
-            val resolved = findFromApkStrings(lpparam)
+            val fromApk = ApkDex.scan(appInfo, logger) { bytes ->
+                DexFile.parse(bytes)?.firstString { it.isFeiniuPrefix() }
+            }
+            val resolved = fromApk?.let { ResolvedPrefix(it, "apk-dex") }
                 ?: ResolvedPrefix(KNOWN_PREFIX, "builtin")
 
             cachedPrefix = resolved
             return resolved
         }
 
-        private fun findFromApkStrings(lpparam: XC_LoadPackage.LoadPackageParam): ResolvedPrefix? {
+        private fun String.isFeiniuPrefix(): Boolean =
+            length in 16..80 && PREFIX_REGEX.matches(this)
+    }
+
+    /** Walks the DEX images of the installed target APKs. */
+    private object ApkDex {
+
+        fun <T : Any> scan(
+            appInfo: ApplicationInfo?,
+            logger: (String) -> Unit,
+            transform: (ByteArray) -> T?,
+        ): T? {
             val sourcePaths = buildList {
-                add(lpparam.appInfo?.sourceDir)
-                lpparam.appInfo?.splitSourceDirs?.let(::addAll)
+                add(appInfo?.sourceDir)
+                appInfo?.splitSourceDirs?.let(::addAll)
             }.filterNotNull()
 
             if (sourcePaths.isEmpty()) {
-                log("apk scan skipped: no source paths")
+                logger("apk scan skipped: no source paths")
                 return null
             }
 
             for (sourcePath in sourcePaths) {
-                val prefix = findFromZip(File(sourcePath))
-                if (!prefix.isNullOrBlank()) return ResolvedPrefix(prefix, "apk-dex")
+                scanApk(File(sourcePath), logger, transform)?.let { return it }
             }
             return null
         }
 
-        private fun findFromZip(apk: File): String? {
+        private fun <T : Any> scanApk(
+            apk: File,
+            logger: (String) -> Unit,
+            transform: (ByteArray) -> T?,
+        ): T? {
             if (!apk.isFile) {
-                log("apk scan skipped: missing ${apk.path}")
+                logger("apk scan skipped: missing ${apk.path}")
                 return null
             }
 
@@ -735,100 +940,26 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
                         .toList()
 
                     if (dexEntries.isEmpty()) {
-                        log("apk scan skipped: no dex entries in ${apk.name}")
+                        logger("apk scan skipped: no dex entries in ${apk.name}")
                         return null
                     }
 
                     for (entry in dexEntries) {
                         val bytes = zipFile.getInputStream(entry).use { it.readBytes() }
-                        val prefix = findFromDexStrings(bytes, entry.name)
-                        if (!prefix.isNullOrBlank()) return prefix
+                        transform(bytes)?.let { return it }
                     }
                 }
-                log("apk scan did not find Feiniu prefix in ${apk.name}")
                 null
             } catch (error: Throwable) {
-                log("apk scan failed for ${apk.name}: ${error.javaClass.simpleName}: ${error.message}")
+                logger("apk scan failed for ${apk.name}: ${error.javaClass.simpleName}: ${error.message}")
                 null
             }
         }
-
-        private fun findFromDexStrings(dex: ByteArray, entryName: String): String? {
-            if (dex.size < DEX_HEADER_SIZE) {
-                log("dex scan skipped: $entryName is too small")
-                return null
-            }
-            if (!dex.startsWithDexMagic()) {
-                log("dex scan skipped: $entryName is not standard dex")
-                return null
-            }
-
-            val stringIdsSize = dex.readUIntLe(DEX_STRING_IDS_SIZE_OFFSET)
-            val stringIdsOffset = dex.readUIntLe(DEX_STRING_IDS_OFFSET_OFFSET)
-            if (stringIdsSize <= 0 || stringIdsOffset <= 0) {
-                log("dex scan skipped: $entryName has invalid string table")
-                return null
-            }
-
-            for (index in 0 until stringIdsSize) {
-                val stringIdOffset = stringIdsOffset + index * DEX_STRING_ID_SIZE
-                if (stringIdOffset + DEX_STRING_ID_SIZE > dex.size) {
-                    log("dex scan stopped: $entryName string id table out of bounds")
-                    return null
-                }
-
-                val stringDataOffset = dex.readUIntLe(stringIdOffset)
-                val stringValue = dex.readDexString(stringDataOffset) ?: continue
-                if (stringValue.isFeiniuPrefix()) return stringValue
-            }
-
-            return null
-        }
-
-        private fun ByteArray.startsWithDexMagic(): Boolean {
-            return size >= 4 && this[0] == 'd'.code.toByte() && this[1] == 'e'.code.toByte() &&
-                this[2] == 'x'.code.toByte() && this[3] == '\n'.code.toByte()
-        }
-
-        private fun ByteArray.readUIntLe(offset: Int): Int {
-            if (offset < 0 || offset + 4 > size) return -1
-            return (this[offset].toInt() and 0xff) or
-                ((this[offset + 1].toInt() and 0xff) shl 8) or
-                ((this[offset + 2].toInt() and 0xff) shl 16) or
-                ((this[offset + 3].toInt() and 0xff) shl 24)
-        }
-
-        private fun ByteArray.readDexString(offset: Int): String? {
-            if (offset < 0 || offset >= size) return null
-
-            var cursor = offset
-            while (cursor < size) {
-                val value = this[cursor].toInt() and 0xff
-                cursor++
-                if ((value and 0x80) == 0) break
-            }
-            if (cursor >= size) return null
-
-            val start = cursor
-            while (cursor < size && this[cursor].toInt() != 0) cursor++
-            if (cursor >= size || cursor == start) return null
-
-            return runCatching { String(this, start, cursor - start, Charsets.UTF_8) }.getOrNull()
-        }
-
-        private fun String.isFeiniuPrefix(): Boolean {
-            return length in 16..80 && PREFIX_REGEX.matches(this)
-        }
-
     }
 
-    private data class ResolvedPrefix(
-        val value: String,
-        val source: String,
-    )
-
     companion object {
-        private const val TARGET_PACKAGE = "com.coloros.gallery3d"
+        private const val TAG = "ColorOSFeiniuBridge"
+        private const val GALLERY_PACKAGE = "com.coloros.gallery3d"
         private const val PRIVATE_LAN_TLS_CLASS = "com.oplus.aiunit.vision.ktc0"
         private const val PRIVATE_LAN_TLS_METHOD = "k"
         private const val MAX_TOKEN_DECRYPT_DIAGNOSTIC_EVENTS = 20
@@ -893,14 +1024,18 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
         private const val CLOUD_BACKGROUND_MAX_TEMPERATURE_C = 43.0f
         private const val CLOUD_RETRY_TEMPERATURE_C = 41.0f
         private const val KNOWN_PREFIX = "tRiM@2025#GwToken!sEcReT*kEy&vALu"
-        private const val DEX_HEADER_SIZE = 0x70
-        private const val DEX_STRING_IDS_SIZE_OFFSET = 0x38
-        private const val DEX_STRING_IDS_OFFSET_OFFSET = 0x3c
-        private const val DEX_STRING_ID_SIZE = 4
         private val PREFIX_REGEX = Regex("""[A-Za-z][A-Za-z0-9@#_!*&$%+?.-]{7,79}GwToken[A-Za-z0-9@#_!*&$%+?.-]{4,80}""")
         private val backupConditionEvaluationDepth = ThreadLocal.withInitial { 0 }
         private val backupConditionForeground = ThreadLocal<Boolean?>()
         private val mobileNetworkEvaluationDepth = ThreadLocal.withInitial { 0 }
+
+        @Volatile
+        private var fallbackLogged = false
+        private val fallbackLock = Any()
+
+        @Volatile
+        private var throwLogged = false
+        private val throwLock = Any()
 
         private data class ClassCandidate(
             val name: String,
@@ -912,14 +1047,10 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
             classNames: Array<String>,
         ): List<ClassCandidate> {
             return classNames.mapNotNull { className ->
-                runCatching {
-                    ClassCandidate(className, XposedHelpers.findClass(className, classLoader))
-                }.getOrNull()
+                BridgeReflect.findClassOrNull(className, classLoader)?.let { type ->
+                    ClassCandidate(className, type)
+                }
             }
-        }
-
-        private fun Any?.isNullOrBlankString(): Boolean {
-            return (this as? String).isNullOrBlank()
         }
 
         private fun leaveMobileNetworkEvaluationScope() {
@@ -933,8 +1064,8 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
 
         private fun currentApplication(): Context? {
             return runCatching {
-                val activityThread = XposedHelpers.findClass("android.app.ActivityThread", null)
-                XposedHelpers.callStaticMethod(activityThread, "currentApplication") as? Context
+                val activityThread = Class.forName("android.app.ActivityThread")
+                BridgeReflect.callStaticMethod(activityThread, "currentApplication") as? Context
             }.getOrNull()
         }
 
@@ -949,7 +1080,7 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
                 }.getOrNull()
             }
             return runCatching {
-                XposedHelpers.getObjectField(backupState, PAUSE_REASON_FIELD)?.toString()
+                BridgeReflect.getObjectField(backupState, PAUSE_REASON_FIELD)?.toString()
             }.getOrNull()
         }
 
@@ -1033,8 +1164,54 @@ class FeiniuBridgeHook : IXposedHookLoadPackage {
             }
         }
 
-        private fun log(message: String) {
-            XposedBridge.log("ColorOSFeiniuBridge: $message")
+        private fun shouldLogFallback(): Boolean {
+            return !fallbackLogged && synchronized(fallbackLock) {
+                if (fallbackLogged) {
+                    false
+                } else {
+                    fallbackLogged = true
+                    true
+                }
+            }
         }
+
+        private fun shouldLogThrow(): Boolean {
+            return !throwLogged && synchronized(throwLock) {
+                if (throwLogged) {
+                    false
+                } else {
+                    throwLogged = true
+                    true
+                }
+            }
+        }
+
+        private fun logInfo(message: String) {
+            emitLog(Log.INFO, message, null)
+        }
+
+        private fun logWarn(message: String, throwable: Throwable? = null) {
+            emitLog(Log.WARN, message, throwable)
+        }
+
+        private fun logError(message: String, throwable: Throwable? = null) {
+            emitLog(Log.ERROR, message, throwable)
+        }
+
+        private fun emitLog(priority: Int, message: String, throwable: Throwable?) {
+            val sink = logSink
+            if (sink != null) {
+                sink(priority, TAG, message, throwable)
+            } else {
+                Log.println(priority, TAG, message)
+            }
+        }
+
+        private fun installLogSink(sink: (Int, String, String, Throwable?) -> Unit) {
+            logSink = sink
+        }
+
+        @Volatile
+        private var logSink: ((Int, String, String, Throwable?) -> Unit)? = null
     }
 }

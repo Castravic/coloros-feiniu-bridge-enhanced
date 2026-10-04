@@ -3,7 +3,7 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-val xposedCompileApiVersion = "82"
+val libxposedVersion = "102.0.0"
 val releaseStoreFile = System.getenv("SIGNING_STORE_FILE")
 val releaseStorePassword = System.getenv("SIGNING_STORE_PASSWORD")
 val releaseKeyAlias = System.getenv("SIGNING_KEY_ALIAS")
@@ -18,8 +18,8 @@ android {
         applicationId = "io.github.colorosfeiniu.bridge"
         minSdk = 26
         targetSdk = 35
-        versionCode = 14
-        versionName = "0.3.6"
+        versionCode = 15
+        versionName = "0.4.0"
     }
 
     if (
@@ -47,6 +47,12 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+
+    packaging {
+        resources {
+            merges += "META-INF/xposed/*"
+        }
+    }
 }
 
 kotlin {
@@ -54,8 +60,15 @@ kotlin {
 }
 
 dependencies {
-    // Pure legacy Xposed Bridge module. Do not add libxposed entry points here.
-    compileOnly("de.robv.android.xposed:api:$xposedCompileApiVersion")
+    // Modern libxposed API 102 module (see META-INF/xposed descriptors).
+    compileOnly("io.github.libxposed:api:$libxposedVersion")
     implementation("org.luckypray:dexkit:2.2.0")
+    testImplementation("io.github.libxposed:api:$libxposedVersion")
     testImplementation("junit:junit:4.13.2")
+}
+
+tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
+    listOf("gallery.dex.path", "mydevices.dex.path").forEach { property ->
+        System.getProperty(property)?.let { path -> systemProperty(property, path) }
+    }
 }

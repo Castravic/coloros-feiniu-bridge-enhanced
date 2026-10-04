@@ -1,14 +1,25 @@
 package io.github.colorosfeiniu.bridge
 
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
 import io.github.colorosfeiniu.bridge.resolver.ValidatedGalleryHooks
+import io.github.libxposed.api.XposedInterface
+import io.github.libxposed.api.XposedInterface.Chain
+import io.github.libxposed.api.XposedInterface.Hooker
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
 import java.util.concurrent.ConcurrentHashMap
 
+/**
+ * Restores the private cloud album list from the real album data when the Feiniu gallery stat
+ * endpoint fails. Ported from the legacy Xposed after/before hooks to libxposed intercept chains.
+ */
 internal object GalleryStatFallback {
-    fun install(validated: ValidatedGalleryHooks) {
+
+    fun install(
+        module: XposedInterface,
+        validated: ValidatedGalleryHooks,
+        logger: (String) -> Unit,
+    ) {
+        this.logger = logger
         val installed = InstalledVariant(
             cacheMethod = validated.cache,
             connectionMethod = validated.connection,
@@ -16,89 +27,96 @@ internal object GalleryStatFallback {
             photoCount = { value -> validated.photoCount.getInt(value) },
             videoCount = { value -> validated.videoCount.getInt(value) },
         )
-        XposedBridge.hookMethod(validated.stat, StatHook(installed))
-        XposedBridge.hookMethod(validated.albums, AlbumsHook(installed))
+        module.hook(validated.stat).intercept(StatHook(installed))
+        module.hook(validated.albums).intercept(AlbumsHook(installed))
         log("gallery stat fallback installed source=validated")
     }
 
     private class StatHook(
         private val variant: InstalledVariant,
-    ) : XC_MethodHook() {
-        override fun afterHookedMethod(param: MethodHookParam) {
-            val deviceId = param.args.getOrNull(1) as? String ?: return
-            val original = param.throwable
-            if (original == null) {
+    ) : Hooker {
+        override fun intercept(chain: Chain): Any? {
+            val deviceId = chain.getArg(1) as? String ?: return chain.proceed()
+
+            val result = try {
+                chain.proceed()
+            } catch (error: Throwable) {
+                if (!isEligibleStatFailure(error)) throw error
+
+                val cached = readCachedStat(variant, deviceId)
+                if (cached == null || cached.photos.toLong() + cached.videos.toLong() <= 0L) {
+                    variant.statlessDevices.add(deviceId)
+                    logBounded(
+                        "gallery stat fallback cache unavailable; enabling real-albums mode",
+                    )
+                    throw error
+                }
+
                 variant.statlessDevices.remove(deviceId)
-                return
-            }
-            if (!isEligibleStatFailure(original)) return
-
-            val cached = runCatching {
-                val value = variant.cacheMethod.invoke(null, deviceId)
-                    ?: return@runCatching null
-                CachedStat(
-                    value = value,
-                    photos = variant.photoCount(value),
-                    videos = variant.videoCount(value),
-                )
-            }.onFailure { error ->
                 logBounded(
-                    "gallery stat fallback failed stage=cache type=${unwrap(error).javaClass.simpleName}",
+                    "gallery stat fallback used source=local-cache photos=${cached.photos} " +
+                        "videos=${cached.videos}",
                 )
-            }.getOrNull()
-
-            if (cached == null || cached.photos.toLong() + cached.videos.toLong() <= 0L) {
-                variant.statlessDevices.add(deviceId)
-                logBounded(
-                    "gallery stat fallback cache unavailable; enabling real-albums mode",
-                )
-                return
+                return cached.value
             }
 
             variant.statlessDevices.remove(deviceId)
-            param.result = cached.value
-            logBounded(
-                "gallery stat fallback used source=local-cache photos=${cached.photos} videos=${cached.videos}",
-            )
+            return result
         }
     }
 
+    private fun readCachedStat(variant: InstalledVariant, deviceId: String): CachedStat? =
+        runCatching {
+            val value = variant.cacheMethod.invoke(null, deviceId) ?: return@runCatching null
+            CachedStat(
+                value = value,
+                photos = variant.photoCount(value),
+                videos = variant.videoCount(value),
+            )
+        }.onFailure { error ->
+            logBounded(
+                "gallery stat fallback failed stage=cache type=${unwrap(error).javaClass.simpleName}",
+            )
+        }.getOrNull()
+
     private class AlbumsHook(
         private val variant: InstalledVariant,
-    ) : XC_MethodHook() {
-        override fun beforeHookedMethod(param: MethodHookParam) {
-            val deviceId = param.args.getOrNull(2) as? String ?: return
-            if (!variant.statlessDevices.contains(deviceId)) return
+    ) : Hooker {
+        override fun intercept(chain: Chain): Any? {
+            val deviceId = chain.getArg(2) as? String
+            val provider = chain.getThisObject() ?: return chain.proceed()
 
-            val offset = param.args[0] as Int
-            val limit = param.args[1] as Int
-            runCatching {
-                invokeRealAlbums(param.thisObject, deviceId, limit, offset)
-            }.onSuccess { result ->
-                param.result = result
-                logRealAlbums(offset, limit, result)
-            }.onFailure { error ->
-                val failure = unwrapStageFailure(error)
-                param.throwable = failure.cause
-                logFallbackFailure(failure)
+            if (deviceId != null && variant.statlessDevices.contains(deviceId)) {
+                val offset = chain.getArg(0) as Int
+                val limit = chain.getArg(1) as Int
+                return runCatching {
+                    invokeRealAlbums(provider, deviceId, limit, offset)
+                }.onSuccess { result ->
+                    logRealAlbums(offset, limit, result)
+                }.getOrElse { error ->
+                    val failure = unwrapStageFailure(error)
+                    logFallbackFailure(failure)
+                    throw failure.cause
+                }
             }
-        }
 
-        override fun afterHookedMethod(param: MethodHookParam) {
-            val original = param.throwable?.takeIf(::isEligibleStatFailure) ?: return
-            val deviceId = param.args.getOrNull(2) as? String ?: return
-            val offset = param.args[0] as Int
-            val limit = param.args[1] as Int
-            variant.statlessDevices.add(deviceId)
+            try {
+                return chain.proceed()
+            } catch (original: Throwable) {
+                if (deviceId == null || !isEligibleStatFailure(original)) throw original
 
-            runCatching {
-                invokeRealAlbums(param.thisObject, deviceId, limit, offset)
-            }.onSuccess { result ->
-                param.result = result
-                logRealAlbums(offset, limit, result)
-            }.onFailure { error ->
-                param.throwable = original
-                logFallbackFailure(unwrapStageFailure(error))
+                val offset = chain.getArg(0) as Int
+                val limit = chain.getArg(1) as Int
+                variant.statlessDevices.add(deviceId)
+
+                return runCatching {
+                    invokeRealAlbums(provider, deviceId, limit, offset)
+                }.onSuccess { result ->
+                    logRealAlbums(offset, limit, result)
+                }.getOrElse { error ->
+                    logFallbackFailure(unwrapStageFailure(error))
+                    throw original
+                }
             }
         }
 
@@ -184,7 +202,7 @@ internal object GalleryStatFallback {
     }
 
     private fun log(message: String) {
-        XposedBridge.log("ColorOSFeiniuBridge: $message")
+        logger.invoke(message)
     }
 
     private data class InstalledVariant(
@@ -213,6 +231,9 @@ internal object GalleryStatFallback {
     private const val STAGE_ALBUMS = "albums"
     private const val MAX_CAUSE_DEPTH = 8
     private const val MAX_DIAGNOSTIC_EVENTS = 40
+
+    @Volatile
+    private var logger: (String) -> Unit = {}
 
     private val logLock = Any()
     private var loggedEvents = 0

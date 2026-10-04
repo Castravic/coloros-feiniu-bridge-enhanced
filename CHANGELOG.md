@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.4.0
+
+- 合并上游 [Costben/coloros-feiniu-bridge](https://github.com/Costben/coloros-feiniu-bridge) 的 ColorOS 17 支持：迁移到 libxposed API 102 架构（`META-INF/xposed` 描述符 + `XposedModule` 入口 + interceptor 链），并新增设备空间（`com.heytap.mydevices`）支持。
+- token 定位沿用上游：已知类名 + 完整方法结构快速路径，失配后按 DEX 结构扫描，最后回退到旧版已知类名。
+- 在 libxposed API 102 入口上重新接回全部 Enhanced 增强：语义连接解析器与 APK 指纹缓存、私有云统计回退、RFC1918 私网 TLS 兼容、备份温控、暂停原因文案、移动数据备份开关。
+- token 修复优先使用上游实现；DexKit 语义解析仅在上游未确认到目标时作为兜底，避免重复 hook 与能力退化。
+- ColorOS 17 相册尚未验证的温控 / TLS 精确映射保持 graceful no-op，只记录日志，不安装 hook、不崩溃；旧版本映射保留。
+- 版本号提升到 `0.4.0`（versionCode 15）。
+
 ## v0.3.6
 
 - 新增私有云连接语义解析：相册更新导致混淆类名变化时，按 token 解密和相册统计的稳定行为特征定位 Hook，不再只依赖固定类名。
