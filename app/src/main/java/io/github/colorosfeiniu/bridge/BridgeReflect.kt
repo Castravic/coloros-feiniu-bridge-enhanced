@@ -8,8 +8,17 @@ import java.lang.reflect.Modifier
 /**
  * Minimal reflection helpers standing in for the legacy `XposedHelpers` used before the libxposed
  * API 102 migration. Only the lookups the bridge actually makes are provided.
+ *
+ * The runtime helpers ([callMethod], [callStaticMethod], [newInstance]) never throw on a missing
+ * target: a Gallery build that reshuffles names must degrade to a logged no-op, not to an exception
+ * escaping an interceptor. Invocation failures of a target that *does* exist still propagate — those
+ * are real bugs in the hooked code and callers wrap them where a fallback is meaningful.
  */
 internal object BridgeReflect {
+
+    /** Sink for "lookup missed" diagnostics; installed by the module during startup. */
+    @Volatile
+    var missLogger: ((String) -> Unit)? = null
 
     fun findClassOrNull(className: String, classLoader: ClassLoader?): Class<*>? =
         runCatching { Class.forName(className, false, classLoader) }.getOrNull()
@@ -50,20 +59,50 @@ internal object BridgeReflect {
             constructor.apply { isAccessible = true }
         }
 
-    fun callMethod(target: Any, name: String, vararg args: Any?): Any? =
-        findMethod(target.javaClass, name, args)?.invoke(target, *args)
-            ?: error("no method $name on ${target.javaClass.name}")
+    fun callMethod(target: Any?, name: String, vararg args: Any?): Any? {
+        if (target == null) {
+            miss("method $name skipped: null target")
+            return null
+        }
+        val method = findMethod(target.javaClass, name, args)
+        if (method == null) {
+            miss("no method $name(${args.size}) on ${target.javaClass.name}")
+            return null
+        }
+        return method.invoke(target, *args)
+    }
 
-    fun callStaticMethod(type: Class<*>, name: String, vararg args: Any?): Any? =
-        findMethod(type, name, args)?.invoke(null, *args)
-            ?: error("no static method $name on ${type.name}")
+    fun callStaticMethod(type: Class<*>?, name: String, vararg args: Any?): Any? {
+        if (type == null) {
+            miss("static method $name skipped: null type")
+            return null
+        }
+        val method = findMethod(type, name, args)
+        if (method == null) {
+            miss("no static method $name(${args.size}) on ${type.name}")
+            return null
+        }
+        return method.invoke(null, *args)
+    }
 
-    fun newInstance(type: Class<*>, vararg args: Any?): Any {
+    fun newInstance(type: Class<*>?, vararg args: Any?): Any? {
+        if (type == null) {
+            miss("constructor skipped: null type")
+            return null
+        }
         val constructor = type.declaredConstructors.firstOrNull { candidate ->
             parametersMatch(candidate.parameterTypes, args)
-        } ?: error("no matching constructor on ${type.name}")
+        }
+        if (constructor == null) {
+            miss("no matching constructor on ${type.name}")
+            return null
+        }
         constructor.isAccessible = true
         return constructor.newInstance(*args)
+    }
+
+    private fun miss(message: String) {
+        runCatching { missLogger?.invoke(message) }
     }
 
     private fun findMethod(type: Class<*>, name: String, args: Array<out Any?>): Method? {

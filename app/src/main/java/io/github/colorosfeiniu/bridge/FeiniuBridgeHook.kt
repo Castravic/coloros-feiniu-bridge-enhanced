@@ -4,6 +4,12 @@ import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.util.Log
 import io.github.colorosfeiniu.bridge.resolver.ConnectionResolutionBootstrap
+import io.github.colorosfeiniu.bridge.resolver.EnhancementDexView
+import io.github.colorosfeiniu.bridge.resolver.EnhancementLocator
+import io.github.colorosfeiniu.bridge.resolver.EnhancementResolutionCache
+import io.github.colorosfeiniu.bridge.resolver.EnhancementTargets
+import io.github.colorosfeiniu.bridge.resolver.GalleryFingerprint
+import io.github.colorosfeiniu.bridge.resolver.LocatedMethod
 import io.github.colorosfeiniu.bridge.resolver.ResolutionSource
 import io.github.colorosfeiniu.bridge.resolver.ValidatedTokenHooks
 import io.github.libxposed.api.XposedInterface.Chain
@@ -35,6 +41,7 @@ class FeiniuBridgeHook : XposedModule() {
                 log(priority, tag, message)
             }
         }
+        BridgeReflect.missLogger = { message -> logReflectionMiss(message) }
 
         val packageName = param.packageName
         val profile = TokenDecryptorTargets.forPackage(packageName) ?: return
@@ -104,11 +111,135 @@ class FeiniuBridgeHook : XposedModule() {
         }
 
         installPrivateLanTlsCompatibility(classLoader)
-        installBackupPauseDiagnostics(classLoader)
-        installBackupTemperatureCompatibility(classLoader)
-        installBackupPauseReasonText(classLoader)
-        installMobileDataBackup(classLoader)
+
+        val enhancements = resolveGalleryEnhancements(appInfo, classLoader)
+        installBackupPauseDiagnostics(classLoader, enhancements)
+        installBackupTemperatureCompatibility(classLoader, enhancements)
+        installBackupPauseReasonText(classLoader, enhancements)
+        installMobileDataBackup(classLoader, enhancements)
         installMobileDataPreference(classLoader)
+    }
+
+    /**
+     * Resolves the Gallery enhancement targets through the fingerprint cache, then a DEX scan.
+     *
+     * Every located target is re-validated against the live class loader before it is used or
+     * cached, so a stale entry or a partially matching build degrades to a no-op.
+     */
+    private fun resolveGalleryEnhancements(
+        appInfo: ApplicationInfo,
+        classLoader: ClassLoader,
+    ): EnhancementTargets {
+        val context = currentApplication()
+        val fingerprint = context?.let { value ->
+            runCatching { GalleryFingerprint.from(value) }.getOrNull()
+        }
+        val cache = if (context != null && fingerprint != null) {
+            EnhancementResolutionCache(context, fingerprint)
+        } else {
+            null
+        }
+
+        cache?.read { true }
+            ?.let { cached -> validateEnhancementTargets(cached, classLoader) }
+            ?.let { validated ->
+                logInfo("enhancement resolver source=cache")
+                return validated
+            }
+
+        val views = mutableListOf<io.github.colorosfeiniu.bridge.resolver.ClassView>()
+        ApkDex.forEachDex(
+            appInfo = appInfo,
+            logger = { message -> logInfo(message) },
+            action = { bytes -> views += EnhancementDexView.from(bytes) },
+        )
+        val located = EnhancementLocator.locate(views)
+        located.diagnostics.forEach { message -> logInfo("enhancement locator: $message") }
+        // Keep only the groups the live class loader confirms; never cache an unvalidated guess.
+        val validated = validateEnhancementTargets(located, classLoader) ?: EnhancementTargets(
+            temperatureProvider = null,
+            pauseConditionCheckers = emptyList(),
+            pauseStateInfoClass = null,
+            pauseReasonText = null,
+            diagnostics = located.diagnostics,
+        )
+        if (!validated.isEmpty) cache?.write(validated)
+        logInfo(
+            "enhancement resolver source=dex-scan " +
+                "temperature=${validated.temperatureProvider?.className ?: "none"} " +
+                "checkers=${validated.pauseConditionCheckers.size} " +
+                "stateInfo=${validated.pauseStateInfoClass ?: "none"} " +
+                "text=${validated.pauseReasonText?.className ?: "none"}",
+        )
+        return validated
+    }
+
+    /**
+     * Drops any located target the running Gallery build cannot actually provide.
+     *
+     * Returns null when *every* group is unusable, so the caller can keep the raw scan result and its
+     * diagnostics for the log.
+     */
+    private fun validateEnhancementTargets(
+        targets: EnhancementTargets,
+        classLoader: ClassLoader,
+    ): EnhancementTargets? {
+        val temperature = targets.temperatureProvider?.takeIf { target ->
+            declaresMethod(classLoader, target, requireStatic = true)
+        }
+        val checkers = targets.pauseConditionCheckers.filter { target ->
+            declaresMethod(classLoader, target, requireStatic = false)
+        }
+        val text = targets.pauseReasonText?.takeIf { target ->
+            declaresMethod(classLoader, target, requireStatic = false)
+        }
+        val stateInfo = targets.pauseStateInfoClass?.takeIf { className ->
+            BridgeReflect.findClassOrNull(className, classLoader) != null
+        }
+        if (
+            temperature == null && checkers.isEmpty() && text == null && stateInfo == null
+        ) {
+            return null
+        }
+        return EnhancementTargets(
+            temperatureProvider = temperature,
+            pauseConditionCheckers = checkers,
+            pauseStateInfoClass = stateInfo,
+            pauseReasonText = text,
+            diagnostics = targets.diagnostics,
+        )
+    }
+
+    private fun declaresMethod(
+        classLoader: ClassLoader,
+        target: LocatedMethod,
+        requireStatic: Boolean,
+    ): Boolean {
+        val type = BridgeReflect.findClassOrNull(target.className, classLoader) ?: return false
+        return type.declaredMethods.any { method ->
+            method.name == target.methodName &&
+                methodDescriptor(method) == target.descriptor &&
+                (!requireStatic || Modifier.isStatic(method.modifiers))
+        }
+    }
+
+    private fun methodDescriptor(method: Method): String {
+        val parameters = method.parameterTypes.joinToString("") { type -> classDescriptor(type) }
+        return "($parameters)${classDescriptor(method.returnType)}"
+    }
+
+    private fun classDescriptor(type: Class<*>): String = when {
+        type == Void.TYPE -> "V"
+        type == Boolean::class.javaPrimitiveType -> "Z"
+        type == Byte::class.javaPrimitiveType -> "B"
+        type == Char::class.javaPrimitiveType -> "C"
+        type == Short::class.javaPrimitiveType -> "S"
+        type == Int::class.javaPrimitiveType -> "I"
+        type == Long::class.javaPrimitiveType -> "J"
+        type == Float::class.javaPrimitiveType -> "F"
+        type == Double::class.javaPrimitiveType -> "D"
+        type.isArray -> "[" + classDescriptor(type.componentType)
+        else -> "L" + type.name.replace('.', '/') + ";"
     }
 
     /**
@@ -166,6 +297,9 @@ class FeiniuBridgeHook : XposedModule() {
     }
 
     private fun installPrivateLanTlsCompatibility(classLoader: ClassLoader) {
+        // Kept as a static attempt only: the 16.40.x anchor (`ktc0.k(String)`) no longer carries the
+        // trust decision in 17.9.24, and no obfuscation-resistant dynamic anchor could be confirmed.
+        // The shape check below keeps this a hard no-op rather than a wrong hook.
         runCatching {
             val tlsSelectorClass = BridgeReflect.findClassOrNull(PRIVATE_LAN_TLS_CLASS, classLoader)
             if (tlsSelectorClass == null) {
@@ -196,70 +330,49 @@ class FeiniuBridgeHook : XposedModule() {
         }
     }
 
-    private fun installBackupPauseDiagnostics(classLoader: ClassLoader) {
-        runCatching {
-            val pauseReason = Class.forName(BACKUP_PAUSE_REASON_CLASS, false, classLoader)
-            val methods = loadExistingClasses(classLoader, BACKUP_CONDITION_CHECKER_CLASSES)
-                .flatMap { candidate ->
-                    candidate.type.declaredMethods.filter { method ->
-                        method.name == BACKUP_CONDITION_METHOD &&
-                            method.returnType == pauseReason &&
-                            method.parameterTypes.contentEquals(
-                                arrayOf(Boolean::class.javaPrimitiveType, Boolean::class.javaPrimitiveType),
-                            )
-                    }
-                }
-            methods.forEach { method ->
-                method.isAccessible = true
-                hook(method).intercept(BackupPauseReasonHook)
-            }
-
-            if (methods.isEmpty()) {
-                logInfo("backup pause diagnostics unavailable")
-            } else {
-                logInfo("backup pause diagnostics installed")
-            }
-        }.onFailure { error ->
-            logInfo("backup pause diagnostics install failed: ${error.javaClass.simpleName}: ${error.message}")
+    private fun installBackupPauseDiagnostics(
+        classLoader: ClassLoader,
+        targets: EnhancementTargets,
+    ) {
+        val hooked = hookLocatedTargets(
+            classLoader = classLoader,
+            targets = targets.pauseConditionCheckers,
+            requireStatic = false,
+            hooker = BackupPauseReasonHook,
+        )
+        if (hooked == 0) {
+            logInfo("backup pause diagnostics unavailable")
+        } else {
+            logInfo("backup pause diagnostics installed methods=$hooked")
         }
     }
 
-    private fun installBackupTemperatureCompatibility(classLoader: ClassLoader) {
+    private fun installBackupTemperatureCompatibility(
+        classLoader: ClassLoader,
+        targets: EnhancementTargets,
+    ) {
         runCatching {
-            val pauseReason = Class.forName(BACKUP_PAUSE_REASON_CLASS, false, classLoader)
-            CloudBackupTemperaturePolicy.activityLifecycleClass =
-                BridgeReflect.findClassOrNull(ACTIVITY_LIFECYCLE_CLASS, classLoader)
+            CloudBackupTemperaturePolicy.activityLifecycleMethod =
+                resolveActivityForegroundMethod(classLoader)
 
-            val conditionMethods = loadExistingClasses(classLoader, BACKUP_CONDITION_CHECKER_CLASSES)
-                .flatMap { candidate ->
-                    candidate.type.declaredMethods.filter { method ->
-                        method.name == RAW_BACKUP_CONDITION_METHOD &&
-                            method.returnType == pauseReason &&
-                            method.parameterTypes.contentEquals(
-                                arrayOf(Boolean::class.javaPrimitiveType, Boolean::class.javaPrimitiveType),
-                            )
-                    }
-                }
-            val temperatureMethods = loadExistingClasses(classLoader, TEMPERATURE_UTIL_CLASSES)
-                .flatMap { candidate ->
-                    candidate.type.declaredMethods.filter { method ->
-                        method.name == TEMPERATURE_METHOD &&
-                            method.returnType == Float::class.javaPrimitiveType &&
-                            method.parameterTypes.isEmpty()
-                    }
-                }
+            val conditionHooked = hookLocatedTargets(
+                classLoader = classLoader,
+                targets = targets.pauseConditionCheckers,
+                requireStatic = false,
+                hooker = BackupConditionEvaluationScopeHook,
+            )
+            val temperatureHooked = hookLocatedTargets(
+                classLoader = classLoader,
+                targets = listOfNotNull(targets.temperatureProvider),
+                requireStatic = true,
+                hooker = RelaxBackupTemperatureHook,
+            )
 
-            conditionMethods.forEach { method ->
-                method.isAccessible = true
-                hook(method).intercept(BackupConditionEvaluationScopeHook)
-            }
-            temperatureMethods.forEach { method ->
-                method.isAccessible = true
-                hook(method).intercept(RelaxBackupTemperatureHook)
-            }
-
-            if (conditionMethods.isEmpty() || temperatureMethods.isEmpty()) {
-                logInfo("backup temperature compatibility unavailable")
+            if (conditionHooked == 0 || temperatureHooked == 0) {
+                logInfo(
+                    "backup temperature compatibility unavailable " +
+                        "conditionHooks=$conditionHooked temperatureHooks=$temperatureHooked",
+                )
             } else {
                 logInfo(
                     "backup temperature compatibility installed " +
@@ -273,9 +386,37 @@ class FeiniuBridgeHook : XposedModule() {
         }
     }
 
-    private fun installBackupPauseReasonText(classLoader: ClassLoader) {
+    private fun installBackupPauseReasonText(
+        classLoader: ClassLoader,
+        targets: EnhancementTargets,
+    ) {
         runCatching {
-            val methods = loadExistingClasses(classLoader, NAS_BACKUP_STATE_INFO_CLASSES)
+            val located = hookLocatedTargets(
+                classLoader = classLoader,
+                targets = listOfNotNull(targets.pauseReasonText),
+                requireStatic = false,
+                hooker = BackupPauseReasonTextHook,
+            )
+            val legacy = if (located == 0) hookLegacyPauseReasonText(classLoader) else 0
+            val hooked = located + legacy
+
+            if (hooked == 0) {
+                logInfo("backup pause reason text unavailable")
+            } else {
+                logInfo(
+                    "backup pause reason text installed methods=$hooked " +
+                        "source=${if (located > 0) "dynamic" else "legacy"}",
+                )
+            }
+        }.onFailure { error ->
+            logInfo("backup pause reason text install failed: ${error.javaClass.simpleName}: ${error.message}")
+        }
+    }
+
+    /** Static-name fallback kept for the 16.40.x Gallery builds that still expose the old shape. */
+    private fun hookLegacyPauseReasonText(classLoader: ClassLoader): Int {
+        val methods = runCatching {
+            loadExistingClasses(classLoader, NAS_BACKUP_STATE_INFO_CLASSES)
                 .flatMap { candidate ->
                     candidate.type.declaredMethods.filter { method ->
                         !Modifier.isStatic(method.modifiers) &&
@@ -283,25 +424,22 @@ class FeiniuBridgeHook : XposedModule() {
                             method.parameterTypes.contentEquals(arrayOf(Context::class.java))
                     }
                 }
-            methods.forEach { method ->
-                method.isAccessible = true
-                hook(method).intercept(BackupPauseReasonTextHook)
-            }
-
-            if (methods.isEmpty()) {
-                logInfo("backup pause reason text unavailable")
-            } else {
-                logInfo("backup pause reason text installed")
-            }
-        }.onFailure { error ->
-            logInfo("backup pause reason text install failed: ${error.javaClass.simpleName}: ${error.message}")
+        }.getOrDefault(emptyList())
+        methods.forEach { method ->
+            method.isAccessible = true
+            runCatching { hook(method).intercept(BackupPauseReasonTextHook) }
         }
+        return methods.size
     }
 
-    private fun installMobileDataBackup(classLoader: ClassLoader) {
+    private fun installMobileDataBackup(
+        classLoader: ClassLoader,
+        targets: EnhancementTargets,
+    ) {
         runCatching {
-            val networkMonitor = Class.forName(NETWORK_MONITOR_CLASS, false, classLoader)
+            val networkMonitor = BridgeReflect.findClassOrNull(NETWORK_MONITOR_CLASS, classLoader)
             MobileDataBackupPolicy.networkMonitorClass = networkMonitor
+
             val conditionObserverHooks = loadExistingClasses(
                 classLoader,
                 NAS_BACKUP_CONDITION_OBSERVER_CLASSES,
@@ -319,17 +457,20 @@ class FeiniuBridgeHook : XposedModule() {
                 candidate
             }
 
-            val wlanMethods = networkMonitor.declaredMethods.filter { method ->
+            val wlanMethods = networkMonitor?.declaredMethods?.filter { method ->
                 Modifier.isStatic(method.modifiers) &&
                     method.name == WLAN_VALIDATED_METHOD &&
                     method.returnType == Boolean::class.javaPrimitiveType &&
                     method.parameterTypes.isEmpty()
-            }
+            }.orEmpty()
             wlanMethods.forEach { method ->
                 method.isAccessible = true
                 hook(method).intercept(AllowValidatedMobileNetworkHook)
             }
 
+            // The mobile-network evaluation scope is opened by the NAS condition checkers, which the
+            // temperature/diagnostics installers already hook; only the legacy builds still need the
+            // standalone notification-condition hook.
             val notificationConditionMethods = loadExistingClasses(
                 classLoader,
                 NAS_NOTIFICATION_CONDITION_CLASSES,
@@ -345,15 +486,84 @@ class FeiniuBridgeHook : XposedModule() {
                 hook(method).intercept(MobileNetworkEvaluationScopeHook)
             }
 
-            if (wlanMethods.isEmpty() || notificationConditionMethods.isEmpty() || conditionObserverHooks.isEmpty()) {
-                logInfo("mobile data backup compatibility partially unavailable")
+            val scopeAvailable = notificationConditionMethods.isNotEmpty() ||
+                targets.pauseConditionCheckers.isNotEmpty()
+            if (wlanMethods.isEmpty() || !scopeAvailable) {
+                logInfo(
+                    "mobile data backup compatibility partially unavailable " +
+                        "wlanHooks=${wlanMethods.size} scope=$scopeAvailable " +
+                        "observerHooks=${conditionObserverHooks.size}",
+                )
             } else {
-                logInfo("mobile data backup compatibility installed")
+                logInfo(
+                    "mobile data backup compatibility installed " +
+                        "observerHooks=${conditionObserverHooks.size}",
+                )
             }
         }.onFailure { error ->
             logInfo("mobile data backup compatibility install failed: ${error.javaClass.simpleName}: ${error.message}")
         }
     }
+
+    /**
+     * Hooks every located method that still matches its recorded name and descriptor on the live
+     * class loader. Returns how many methods were hooked.
+     */
+    private fun hookLocatedTargets(
+        classLoader: ClassLoader,
+        targets: List<LocatedMethod>,
+        requireStatic: Boolean,
+        hooker: Hooker,
+    ): Int {
+        var hooked = 0
+        targets.forEach { target ->
+            val type = BridgeReflect.findClassOrNull(target.className, classLoader) ?: return@forEach
+            type.declaredMethods
+                .filter { method ->
+                    method.name == target.methodName &&
+                        methodDescriptor(method) == target.descriptor &&
+                        (!requireStatic || Modifier.isStatic(method.modifiers))
+                }
+                .forEach { method ->
+                    runCatching {
+                        method.isAccessible = true
+                        hook(method).intercept(hooker)
+                        hooked += 1
+                    }.onFailure { error ->
+                        logWarn(
+                            "hook ${target.className}.${target.methodName} failed: " +
+                                "${error.javaClass.simpleName}: ${error.message}",
+                        )
+                    }
+                }
+        }
+        return hooked
+    }
+
+    /**
+     * The 16.40.x builds exposed the foreground flag on an obfuscated `c50`; 17.9.24 moved it to the
+     * un-obfuscated `ActivityLifecycle`. Both are tried, and the method is picked by shape.
+     */
+    private fun resolveActivityForegroundMethod(classLoader: ClassLoader): Method? {
+        ACTIVITY_LIFECYCLE_CLASSES.forEach { className ->
+            val type = BridgeReflect.findClassOrNull(className, classLoader) ?: return@forEach
+            ACTIVITY_FOREGROUND_METHODS.forEach { methodName ->
+                type.declaredMethods
+                    .firstOrNull { method ->
+                        Modifier.isStatic(method.modifiers) &&
+                            method.name == methodName &&
+                            method.returnType == Boolean::class.javaPrimitiveType &&
+                            method.parameterTypes.isEmpty()
+                    }
+                    ?.let { method ->
+                        method.isAccessible = true
+                        return method
+                    }
+            }
+        }
+        return null
+    }
+
 
     private fun installMobileDataPreference(classLoader: ClassLoader) {
         runCatching {
@@ -509,17 +719,18 @@ class FeiniuBridgeHook : XposedModule() {
 
     private object CloudBackupTemperaturePolicy {
         @Volatile
-        var activityLifecycleClass: Class<*>? = null
+        var activityLifecycleMethod: Method? = null
 
         private var blocked = false
         private var lastLoggedState: String? = null
 
         fun evaluate(actualTemperature: Float): TemperatureDecision {
             val foreground = backupConditionForeground.get() ?: runCatching {
-                val method = activityLifecycleClass?.declaredMethods?.firstOrNull {
-                    it.name == ACTIVITY_FOREGROUND_METHOD && it.parameterTypes.isEmpty()
+                val method = activityLifecycleMethod
+                method?.let { candidate ->
+                    candidate.isAccessible = true
+                    candidate.invoke(null) as Boolean
                 }
-                method?.apply { isAccessible = true }?.invoke(null) as Boolean
             }.getOrDefault(false)
             val maxTemperature = if (foreground) {
                 CLOUD_FOREGROUND_MAX_TEMPERATURE_C
@@ -573,17 +784,31 @@ class FeiniuBridgeHook : XposedModule() {
     private object BackupPauseReasonTextHook : Hooker {
         override fun intercept(chain: Chain): Any? {
             val result = chain.proceed()
-            val context = chain.getArg(0) as? Context ?: return result
+            return runCatching { enhancedText(chain, result) }.getOrElse { error ->
+                logWarn("backup pause reason text skipped: ${error.javaClass.simpleName}: ${error.message}")
+                result
+            }
+        }
+
+        private fun enhancedText(chain: Chain, result: Any?): Any? {
+            val context = contextArgument(chain) ?: return result
             MobileDataBackupPolicy.rememberContext(context)
 
-            val backupState = runCatching {
-                BridgeReflect.getObjectField(chain.getThisObject(), NAS_BACKUP_STATE_FIELD)
-            }.getOrNull() ?: return result
-            if (backupState.javaClass.name !in NAS_PAUSED_STATE_CLASSES) return result
-
+            // Dynamic guard: any backup state that carries a PauseReason is a paused state, whatever
+            // the obfuscator called the class on this build.
+            val receiver = chain.getThisObject() ?: return result
+            val backupState = BridgeReflect.getObjectField(receiver, NAS_BACKUP_STATE_FIELD)
+                ?: return result
             val reason = findPauseReason(backupState) ?: return result
-            val text = resolvePauseReasonText(context, reason) ?: return result
-            return text
+            return resolvePauseReasonText(context, reason) ?: result
+        }
+
+        /** The located text method takes `(Context)` or `(int, Context)` depending on the build. */
+        private fun contextArgument(chain: Chain): Context? {
+            for (index in 0 until 2) {
+                (chain.getArg(index) as? Context)?.let { return it }
+            }
+            return null
         }
     }
 
@@ -592,10 +817,26 @@ class FeiniuBridgeHook : XposedModule() {
     ) : Hooker {
         override fun intercept(chain: Chain): Any? {
             val result = chain.proceed()
+            return runCatching { addPreference(chain, result) }.getOrElse { error ->
+                logWarn(
+                    "mobile data backup preference skipped: " +
+                        "${error.javaClass.simpleName}: ${error.message}",
+                )
+                result
+            }
+        }
+
+        private fun addPreference(chain: Chain, result: Any?): Any? {
             val fragment = chain.getThisObject() ?: return result
-            val context = runCatching {
-                BridgeReflect.callMethod(fragment, "getContext") as? Context
-            }.getOrNull() ?: return result
+            if (!declaresMethodNamed(fragment.javaClass, "findPreference")) {
+                logWarnOnce(
+                    "mobileDataPreference",
+                    "mobile data backup preference unavailable: findPreference missing on " +
+                        fragment.javaClass.name,
+                )
+                return result
+            }
+            val context = BridgeReflect.callMethod(fragment, "getContext") as? Context ?: return result
             MobileDataBackupPolicy.rememberContext(context)
 
             val existing = BridgeReflect.callMethod(
@@ -610,9 +851,7 @@ class FeiniuBridgeHook : XposedModule() {
                 "findPreference",
                 NAS_BACKUP_PREFERENCE_KEY,
             ) ?: return result
-            val visible = runCatching {
-                BridgeReflect.callMethod(nasPreference, "isVisible") as Boolean
-            }.getOrDefault(true)
+            val visible = BridgeReflect.callMethod(nasPreference, "isVisible") as? Boolean ?: true
             if (!visible) return result
 
             val category = BridgeReflect.callMethod(
@@ -621,7 +860,7 @@ class FeiniuBridgeHook : XposedModule() {
                 CLOUD_SYNC_CATEGORY_KEY,
             ) ?: return result
             val switchClass = Class.forName(COUI_SWITCH_PREFERENCE_CLASS, false, classLoader)
-            val preference = BridgeReflect.newInstance(switchClass, context)
+            val preference = BridgeReflect.newInstance(switchClass, context) ?: return result
             BridgeReflect.callMethod(preference, "setKey", MOBILE_DATA_PREFERENCE_KEY)
             BridgeReflect.callMethod(preference, "setTitle", mobileDataPreferenceTitle(context))
             BridgeReflect.callMethod(preference, "setSummary", mobileDataPreferenceSummary(context))
@@ -633,9 +872,8 @@ class FeiniuBridgeHook : XposedModule() {
                 "setSummary",
                 nasBackupNetworkSummary(mobileDataEnabled, context),
             )
-            val order = runCatching {
-                BridgeReflect.callMethod(nasPreference, "getOrder") as Int
-            }.getOrDefault(Int.MAX_VALUE - 2)
+            val order = BridgeReflect.callMethod(nasPreference, "getOrder") as? Int
+                ?: (Int.MAX_VALUE - 2)
             BridgeReflect.callMethod(preference, "setOrder", order + 1)
 
             val listenerClass = Class.forName(PREFERENCE_CHANGE_LISTENER_CLASS, false, classLoader)
@@ -738,7 +976,7 @@ class FeiniuBridgeHook : XposedModule() {
         fun isValidatedMobileNetwork(): Boolean {
             val monitor = networkMonitorClass ?: return false
             return runCatching {
-                BridgeReflect.callStaticMethod(monitor, MOBILE_VALIDATED_METHOD) as Boolean
+                BridgeReflect.callStaticMethod(monitor, MOBILE_VALIDATED_METHOD) as? Boolean ?: false
             }.getOrDefault(false)
         }
 
@@ -923,6 +1161,41 @@ class FeiniuBridgeHook : XposedModule() {
             return null
         }
 
+        /** Visits every DEX image of the installed target APKs; never throws on a bad archive. */
+        fun forEachDex(
+            appInfo: ApplicationInfo?,
+            logger: (String) -> Unit,
+            action: (ByteArray) -> Unit,
+        ) {
+            val sourcePaths = buildList {
+                add(appInfo?.sourceDir)
+                appInfo?.splitSourceDirs?.let(::addAll)
+            }.filterNotNull()
+
+            sourcePaths.forEach { sourcePath ->
+                val apk = File(sourcePath)
+                if (!apk.isFile) {
+                    logger("apk scan skipped: missing ${apk.path}")
+                    return@forEach
+                }
+                runCatching {
+                    ZipFile(apk).use { zipFile ->
+                        zipFile.entries().asSequence()
+                            .filter { entry -> entry.name.endsWith(".dex") }
+                            .forEach { entry ->
+                                val bytes = zipFile.getInputStream(entry).use { it.readBytes() }
+                                runCatching { action(bytes) }
+                            }
+                    }
+                }.onFailure { error ->
+                    logger(
+                        "apk scan failed for ${apk.name}: " +
+                            "${error.javaClass.simpleName}: ${error.message}",
+                    )
+                }
+            }
+        }
+
         private fun <T : Any> scanApk(
             apk: File,
             logger: (String) -> Unit,
@@ -965,24 +1238,12 @@ class FeiniuBridgeHook : XposedModule() {
         private const val MAX_TOKEN_DECRYPT_DIAGNOSTIC_EVENTS = 20
         private const val BACKUP_PAUSE_REASON_CLASS =
             "com.oplus.gallery.framework.abilities.cloudsync.nas.backup.state.PauseReason"
-        private const val BACKUP_CONDITION_METHOD = "b"
-        private const val RAW_BACKUP_CONDITION_METHOD = "a"
-        private val BACKUP_CONDITION_CHECKER_CLASSES = arrayOf(
-            "com.oplus.aiunit.vision.bsf",
-            "com.oplus.aiunit.vision.f0q",
-            "com.oplus.aiunit.vision.u0q",
-        )
         private val NAS_BACKUP_STATE_INFO_CLASSES = arrayOf(
             "com.oplus.aiunit.vision.stf",
             "com.oplus.aiunit.vision.o3q",
             "com.oplus.aiunit.vision.d4q",
         )
         private const val NAS_BACKUP_STATE_FIELD = "g"
-        private val NAS_PAUSED_STATE_CLASSES = setOf(
-            "com.oplus.aiunit.vision.otf\$h",
-            "com.oplus.aiunit.vision.k3q\$h",
-            "com.oplus.aiunit.vision.z3q\$h",
-        )
         private const val PAUSE_REASON_FIELD = "a"
         private const val NAS_NOTIFICATION_CONDITION_METHOD = "d"
         private val NAS_NOTIFICATION_CONDITION_CLASSES = arrayOf(
@@ -990,15 +1251,13 @@ class FeiniuBridgeHook : XposedModule() {
             "com.oplus.aiunit.vision.o3q\$a",
             "com.oplus.aiunit.vision.d4q\$a",
         )
-        private val TEMPERATURE_UTIL_CLASSES = arrayOf(
-            "com.oplus.aiunit.vision.vwp",
-            "com.oplus.aiunit.vision.l370",
-            "com.oplus.aiunit.vision.r570",
-            "com.oplus.aiunit.vision.t570",
+        // The temperature provider and the NAS condition checkers are located dynamically; these
+        // names only survive for the legacy fallback paths in [hookLegacyPauseReasonText].
+        private val ACTIVITY_LIFECYCLE_CLASSES = arrayOf(
+            "com.oplus.gallery.foundation.uikit.lifecycle.ActivityLifecycle",
+            "com.oplus.aiunit.vision.c50",
         )
-        private const val TEMPERATURE_METHOD = "a"
-        private const val ACTIVITY_LIFECYCLE_CLASS = "com.oplus.aiunit.vision.c50"
-        private const val ACTIVITY_FOREGROUND_METHOD = "b"
+        private val ACTIVITY_FOREGROUND_METHODS = arrayOf("c", "b")
         private const val NETWORK_MONITOR_CLASS =
             "com.oplus.gallery.standard_lib.util.network.NetworkMonitor"
         private val NAS_BACKUP_CONDITION_OBSERVER_CLASSES = arrayOf(
@@ -1036,6 +1295,13 @@ class FeiniuBridgeHook : XposedModule() {
         @Volatile
         private var throwLogged = false
         private val throwLock = Any()
+
+        private const val MAX_REFLECTION_MISS_LOGS = 24
+        private val reflectionMissLock = Any()
+        private var reflectionMissLogged = 0
+        private val warnedOnce = java.util.Collections.newSetFromMap(
+            java.util.concurrent.ConcurrentHashMap<String, Boolean>(),
+        )
 
         private data class ClassCandidate(
             val name: String,
@@ -1189,6 +1455,28 @@ class FeiniuBridgeHook : XposedModule() {
         private fun logInfo(message: String) {
             emitLog(Log.INFO, message, null)
         }
+
+        /**
+         * Logs a runtime reflection miss at most [MAX_REFLECTION_MISS_LOGS] times per process, so a
+         * hook installed on a method the build no longer has cannot spam the logcat.
+         */
+        private fun logReflectionMiss(message: String) {
+            val count = synchronized(reflectionMissLock) {
+                if (reflectionMissLogged >= MAX_REFLECTION_MISS_LOGS) return
+                reflectionMissLogged += 1
+                reflectionMissLogged
+            }
+            logWarn("reflection miss: $message (event=$count/$MAX_REFLECTION_MISS_LOGS)")
+        }
+
+        /** One-shot log per [key]; used for "this build no longer supports it" diagnostics. */
+        private fun logWarnOnce(key: String, message: String) {
+            if (!warnedOnce.add(key)) return
+            logWarn(message)
+        }
+
+        private fun declaresMethodNamed(type: Class<*>, name: String): Boolean =
+            BridgeReflect.allMethodsNamed(type, name).isNotEmpty()
 
         private fun logWarn(message: String, throwable: Throwable? = null) {
             emitLog(Log.WARN, message, throwable)
