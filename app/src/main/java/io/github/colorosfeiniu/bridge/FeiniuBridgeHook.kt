@@ -731,7 +731,7 @@ class FeiniuBridgeHook : XposedModule() {
                     candidate.isAccessible = true
                     candidate.invoke(null) as Boolean
                 }
-            }.getOrDefault(false)
+            }.getOrNull() ?: false
             val maxTemperature = if (foreground) {
                 CLOUD_FOREGROUND_MAX_TEMPERATURE_C
             } else {
