@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">ColorOS 飞牛 Bridge Enhanced</string>
+    <string name="app_description">面向 ColorOS 16/17 的飞牛私有云增强模块：恢复 NAS token prefix 加载，并保留自动备份温控、暂停原因、统计回退、私网 TLS 与移动数据备份等增强功能。</string>
+</resources>
