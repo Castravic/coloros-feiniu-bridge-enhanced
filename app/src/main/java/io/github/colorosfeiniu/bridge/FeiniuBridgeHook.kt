@@ -82,6 +82,7 @@ class FeiniuBridgeHook : XposedModule() {
                 hook(method).intercept { chain -> interceptPrefixCall(chain, appInfo) }
             }
             logInfo("installed for $packageName class=${target.className} via=${target.source}")
+            installTokenDiagnostics(target.decryptMethods)
         }.onFailure { error ->
             logError("install failed: ${error.javaClass.simpleName}: ${error.message}", error)
         }
@@ -334,10 +335,22 @@ class FeiniuBridgeHook : XposedModule() {
     ) {
         hooks.prefix.isAccessible = true
         hook(hooks.prefix).intercept { chain -> interceptPrefixCall(chain, appInfo) }
-        hooks.decrypt.isAccessible = true
-        hook(hooks.decrypt).intercept(TokenDecryptionDiagnosticHook)
+        installTokenDiagnostics(listOf(hooks.decrypt))
         logInfo("prefix fallback installed source=${source.name.lowercase()}")
-        logInfo("token decryption diagnostics installed methods=1")
+    }
+
+    private fun installTokenDiagnostics(methods: List<Method>) {
+        var installed = 0
+        methods.forEach { method ->
+            runCatching {
+                method.isAccessible = true
+                hook(method).intercept(TokenDecryptionDiagnosticHook)
+                installed += 1
+            }.onFailure { error ->
+                logWarn("token decryption diagnostics install failed: ${error.javaClass.simpleName}")
+            }
+        }
+        if (installed > 0) logInfo("token decryption diagnostics installed methods=$installed")
     }
 
     private fun interceptPrefixCall(chain: Chain, appInfo: ApplicationInfo): Any? {
@@ -723,10 +736,13 @@ class FeiniuBridgeHook : XposedModule() {
 
     private object BackupConditionEvaluationScopeHook : Hooker {
         override fun intercept(chain: Chain): Any? {
+            val previousForeground = backupConditionForeground.get()
             backupConditionEvaluationDepth.set((backupConditionEvaluationDepth.get() ?: 0) + 1)
             mobileNetworkEvaluationDepth.set((mobileNetworkEvaluationDepth.get() ?: 0) + 1)
-            backupConditionForeground.set(chain.getArg(1) as? Boolean)
             try {
+                // NAS checker contract: (foreground, forceRefresh/connected). The second flag
+                // must not select the 43/45 C threshold. Restore the outer value on nested calls.
+                backupConditionForeground.set(chain.getArg(0) as? Boolean)
                 return chain.proceed()
             } finally {
                 val remaining = (backupConditionEvaluationDepth.get() ?: 0) - 1
@@ -735,6 +751,7 @@ class FeiniuBridgeHook : XposedModule() {
                     backupConditionForeground.remove()
                 } else {
                     backupConditionEvaluationDepth.set(remaining)
+                    backupConditionForeground.set(previousForeground)
                 }
                 leaveMobileNetworkEvaluationScope()
             }
@@ -1134,6 +1151,7 @@ class FeiniuBridgeHook : XposedModule() {
                 prefixMethodsOf(resolved.target, profile),
                 resolved.target.name,
                 resolved.source.logValue,
+                TokenDecryptorMethods.decryptMethodsOf(resolved.target, profile),
             )
         }
 
@@ -1195,6 +1213,7 @@ class FeiniuBridgeHook : XposedModule() {
         val methods: List<Method>,
         val className: String?,
         val source: String,
+        val decryptMethods: List<Method> = emptyList(),
     )
 
     private object PrefixResolver {

@@ -29,8 +29,24 @@ jobs:
       - name: Build APKs
         run: gradle :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease
 
-      - name: Sign release APK
+      - name: Check release signing configuration
+        id: signing
         if: github.event_name != 'pull_request'
+        env:
+          SIGNING_KEYSTORE_BASE64: ${{ secrets.ANDROID_SIGNING_KEYSTORE_BASE64 }}
+          SIGNING_STORE_PASSWORD: ${{ secrets.ANDROID_SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.ANDROID_SIGNING_KEY_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.ANDROID_SIGNING_KEY_ALIAS }}
+        run: |
+          if [[ -n "$SIGNING_KEYSTORE_BASE64" && -n "$SIGNING_STORE_PASSWORD" && -n "$SIGNING_KEY_PASSWORD" && -n "$SIGNING_KEY_ALIAS" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Release signing is not configured; uploading the unsigned APK."
+          fi
+
+      - name: Sign release APK
+        if: steps.signing.outputs.enabled == 'true'
         env:
           SIGNING_KEYSTORE_BASE64: ${{ secrets.ANDROID_SIGNING_KEYSTORE_BASE64 }}
           SIGNING_STORE_PASSWORD: ${{ secrets.ANDROID_SIGNING_STORE_PASSWORD }}
@@ -60,14 +76,14 @@ jobs:
           path: app/build/outputs/apk/debug/*.apk
 
       - name: Upload signed release APK
-        if: github.event_name != 'pull_request'
+        if: steps.signing.outputs.enabled == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: coloros-feiniu-bridge-release-signed
           path: app/build/outputs/apk/release/app-release-signed.apk
 
-      - name: Upload unsigned pull request APK
-        if: github.event_name == 'pull_request'
+      - name: Upload unsigned release APK
+        if: steps.signing.outputs.enabled != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: coloros-feiniu-bridge-enhanced-release-unsigned

@@ -151,7 +151,7 @@ ColorOS 17 版本的相册若尚未验证，温控 / TLS 等精确映射会保�
 gradle :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease
 ```
 
-GitHub Actions 会在每次 push、pull request 和手动触发时自动构建。主线 push 和手动构建会上传使用项目固定 release key 签名的 APK；外部 pull request 因无法读取仓库 Secrets，只上传 unsigned release APK。
+GitHub Actions 会在每次 push、pull request 和手动触发时自动构建。主线 push 和手动构建在配置完整签名 Secrets 后上传 signed release APK；未配置完整签名 Secrets 或 pull request 构建时上传 unsigned release APK。unsigned APK 不能直接安装，需要使用项目原有 release key 签名后发布。
 
 如果发布前需要仓库内置 Gradle Wrapper，可以在有 Gradle 的机器上执行一次：
 
@@ -166,25 +166,17 @@ app/build/outputs/apk/debug/app-debug.apk
 app/build/outputs/apk/release/app-release-unsigned.apk
 ```
 
-GitHub Actions 主线构建会额外生成：
+GitHub Actions 主线构建在配置完整签名 Secrets 后会额外生成：
 
 ```text
 app/build/outputs/apk/release/app-release-signed.apk
 ```
 
-固定 release 证书 SHA-256（本 fork，自 `v0.4.0` 起）：
-
-```text
-3EE3590746FD638AB28878856D67C363E0325310CD28C2CB3B46674FFDE1047D
-```
-
-从 `0.4.0` 开始，正式安装和后续覆盖升级均使用该证书签名的 release APK。CI debug APK 使用临时 debug key，不作为稳定升级包。
-
-> ⚠️ 本 fork 的签名证书与上游 `Costben/coloros-feiniu-bridge`（及 `Castravic/coloros-feiniu-bridge-enhanced` 旧版 release，均为 `37653B3C…`）不同——从旧版本切换过来时需卸载后重新安装一次，并在 LSPosed 中重新启用模块；之后本 fork 的后续版本可正常覆盖升级。
+签名 Secrets 为 `ANDROID_SIGNING_KEYSTORE_BASE64`、`ANDROID_SIGNING_STORE_PASSWORD`、`ANDROID_SIGNING_KEY_PASSWORD` 与 `ANDROID_SIGNING_KEY_ALIAS`。维护者应使用项目原有 release key，以保留覆盖升级能力。合并代码不会改变已发布 APK 的证书；其他 fork 发布的 APK 可能使用不同证书，不能据此认定本项目需要卸载重装。CI debug APK 使用临时 debug key，不作为稳定升级包。
 
 ## 安装
 
-1. 安装 GitHub Actions 生成的 signed release APK。
+1. 从 [Releases](../../releases) 下载并安装项目已签名 APK，或使用配置签名后 GitHub Actions 生成的 signed release APK。
 2. 在 LSPosed 中启用模块。
 3. 模块声明的作用域包含 `相册 / com.coloros.gallery3d` 与 `设备空间 / com.heytap.mydevices`。
 4. 强停相册与设备空间，或重启手机。
