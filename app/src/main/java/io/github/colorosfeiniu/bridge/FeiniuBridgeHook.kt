@@ -170,9 +170,9 @@ class FeiniuBridgeHook : XposedModule() {
     ) {
         val enhancements = resolveGalleryEnhancements(context, appInfo, classLoader)
         installBackupPauseDiagnostics(classLoader, enhancements)
-        installBackupTemperatureCompatibility(classLoader, enhancements)
+        val conditionScopeHooks = installBackupTemperatureCompatibility(classLoader, enhancements)
         installBackupPauseReasonText(classLoader, enhancements)
-        installMobileDataBackup(classLoader, enhancements)
+        installMobileDataBackup(classLoader, conditionScopeHooks)
         installMobileDataPreference(classLoader)
     }
 
@@ -320,7 +320,7 @@ class FeiniuBridgeHook : XposedModule() {
         type == Long::class.javaPrimitiveType -> "J"
         type == Float::class.javaPrimitiveType -> "F"
         type == Double::class.javaPrimitiveType -> "D"
-        type.isArray -> "[" + classDescriptor(type.componentType)
+        type.isArray -> "[" + classDescriptor(requireNotNull(type.componentType))
         else -> "L" + type.name.replace('.', '/') + ";"
     }
 
@@ -395,16 +395,13 @@ class FeiniuBridgeHook : XposedModule() {
         // trust decision in 17.9.24, and no obfuscation-resistant dynamic anchor could be confirmed.
         // The shape check below keeps this a hard no-op rather than a wrong hook.
         runCatching {
-            val tlsSelectorClass = BridgeReflect.findClassOrNull(PRIVATE_LAN_TLS_CLASS, classLoader)
-            if (tlsSelectorClass == null) {
-                logInfo("private LAN TLS compatibility unavailable")
-                return@runCatching
-            }
-            val methods = tlsSelectorClass.declaredMethods.filter { method ->
-                method.name == PRIVATE_LAN_TLS_METHOD &&
-                    Modifier.isStatic(method.modifiers) &&
-                    method.returnType == Boolean::class.javaPrimitiveType &&
-                    method.parameterTypes.contentEquals(arrayOf(String::class.java))
+            val methods = loadExistingClasses(classLoader, PRIVATE_LAN_TLS_CLASSES).flatMap { candidate ->
+                candidate.type.declaredMethods.filter { method ->
+                    method.name == PRIVATE_LAN_TLS_METHOD &&
+                        Modifier.isStatic(method.modifiers) &&
+                        method.returnType == Boolean::class.javaPrimitiveType &&
+                        method.parameterTypes.contentEquals(arrayOf(String::class.java))
+                }
             }
             methods.forEach { method ->
                 method.isAccessible = true
@@ -444,8 +441,8 @@ class FeiniuBridgeHook : XposedModule() {
     private fun installBackupTemperatureCompatibility(
         classLoader: ClassLoader,
         targets: EnhancementTargets,
-    ) {
-        runCatching {
+    ): Int {
+        return runCatching {
             CloudBackupTemperaturePolicy.activityLifecycleMethod =
                 resolveActivityForegroundMethod(classLoader)
 
@@ -475,8 +472,10 @@ class FeiniuBridgeHook : XposedModule() {
                         "retry=${CLOUD_RETRY_TEMPERATURE_C}C",
                 )
             }
-        }.onFailure { error ->
+            conditionHooked
+        }.getOrElse { error ->
             logInfo("backup temperature compatibility install failed: ${error.javaClass.simpleName}: ${error.message}")
+            0
         }
     }
 
@@ -528,8 +527,9 @@ class FeiniuBridgeHook : XposedModule() {
 
     private fun installMobileDataBackup(
         classLoader: ClassLoader,
-        targets: EnhancementTargets,
+        conditionScopeHooks: Int,
     ) {
+        MobileDataBackupPolicy.availability = MobileBackupAvailability()
         runCatching {
             val networkMonitor = BridgeReflect.findClassOrNull(NETWORK_MONITOR_CLASS, classLoader)
             MobileDataBackupPolicy.networkMonitorClass = networkMonitor
@@ -538,14 +538,17 @@ class FeiniuBridgeHook : XposedModule() {
                 classLoader,
                 NAS_BACKUP_CONDITION_OBSERVER_CLASSES,
             ).mapNotNull { candidate ->
-                val refreshMethod = candidate.type.declaredMethods.firstOrNull { method ->
+                val refreshMethod = candidate.type.declaredMethods.singleOrNull { method ->
                     !Modifier.isStatic(method.modifiers) &&
+                        method.name == "a" &&
                         method.returnType == Void.TYPE &&
                         method.parameterTypes.contentEquals(
                             arrayOf(Boolean::class.javaPrimitiveType),
                         )
                 }?.apply { isAccessible = true } ?: return@mapNotNull null
-                BridgeReflect.allConstructors(candidate.type).forEach { constructor ->
+                val constructors = BridgeReflect.allConstructors(candidate.type)
+                if (constructors.isEmpty()) return@mapNotNull null
+                constructors.forEach { constructor ->
                     hook(constructor).intercept(RememberConditionObserverHook(refreshMethod))
                 }
                 candidate
@@ -580,23 +583,21 @@ class FeiniuBridgeHook : XposedModule() {
                 hook(method).intercept(MobileNetworkEvaluationScopeHook)
             }
 
-            val scopeAvailable = notificationConditionMethods.isNotEmpty() ||
-                targets.pauseConditionCheckers.isNotEmpty()
-            if (wlanMethods.isEmpty() || !scopeAvailable) {
-                logInfo(
-                    "mobile data backup compatibility partially unavailable " +
-                        "wlanHooks=${wlanMethods.size} scope=$scopeAvailable " +
-                        "observerHooks=${conditionObserverHooks.size}",
-                )
-            } else {
-                logInfo(
-                    "mobile data backup compatibility installed " +
-                        "observerHooks=${conditionObserverHooks.size}",
-                )
-            }
+            val mobileValidatorAvailable = networkMonitor?.declaredMethods?.any { method ->
+                Modifier.isStatic(method.modifiers) && method.name == MOBILE_VALIDATED_METHOD &&
+                    method.returnType == Boolean::class.javaPrimitiveType && method.parameterTypes.isEmpty()
+            } == true
+            MobileDataBackupPolicy.availability = MobileBackupAvailability(
+                wlanHook = wlanMethods.isNotEmpty(),
+                mobileValidator = mobileValidatorAvailable,
+                conditionScope = conditionScopeHooks > 0,
+                observerHook = conditionObserverHooks.isNotEmpty(),
+            )
         }.onFailure { error ->
             logInfo("mobile data backup compatibility install failed: ${error.javaClass.simpleName}: ${error.message}")
         }
+        val availability = MobileDataBackupPolicy.availability
+        logInfo("mobile data backup capability ready=${availability.ready} missing=${availability.missing.joinToString(",")}")
     }
 
     /**
@@ -641,6 +642,7 @@ class FeiniuBridgeHook : XposedModule() {
     private fun resolveActivityForegroundMethod(classLoader: ClassLoader): Method? {
         ACTIVITY_LIFECYCLE_CLASSES.forEach { className ->
             val type = BridgeReflect.findClassOrNull(className, classLoader) ?: return@forEach
+            if (!Application.ActivityLifecycleCallbacks::class.java.isAssignableFrom(type)) return@forEach
             ACTIVITY_FOREGROUND_METHODS.forEach { methodName ->
                 type.declaredMethods
                     .firstOrNull { method ->
@@ -740,9 +742,14 @@ class FeiniuBridgeHook : XposedModule() {
             backupConditionEvaluationDepth.set((backupConditionEvaluationDepth.get() ?: 0) + 1)
             mobileNetworkEvaluationDepth.set((mobileNetworkEvaluationDepth.get() ?: 0) + 1)
             try {
-                // NAS checker contract: (foreground, forceRefresh/connected). The second flag
-                // must not select the 43/45 C threshold. Restore the outer value on nested calls.
-                backupConditionForeground.set(chain.getArg(0) as? Boolean)
+                // Older contracts expose a foreground hint. These checkers use both flags for other
+                // controls, so it must use the lifecycle method or the conservative background limit.
+                val hint = if (chain.getExecutable()?.declaringClass?.name in CONTROL_FLAG_CHECKER_CLASSES) {
+                    null
+                } else {
+                    chain.getArg(0) as? Boolean
+                }
+                backupConditionForeground.set(hint)
                 return chain.proceed()
             } finally {
                 val remaining = (backupConditionEvaluationDepth.get() ?: 0) - 1
@@ -823,13 +830,15 @@ class FeiniuBridgeHook : XposedModule() {
         private var lastLoggedState: String? = null
 
         fun evaluate(actualTemperature: Float): TemperatureDecision {
-            val foreground = backupConditionForeground.get() ?: runCatching {
+            // 16.50.8 naq / 17.10.7 m1s use refresh/background flags, not app foreground.
+            // Prefer the actual lifecycle state whenever that validated method is available.
+            val foreground = runCatching {
                 val method = activityLifecycleMethod
                 method?.let { candidate ->
                     candidate.isAccessible = true
                     candidate.invoke(null) as Boolean
                 }
-            }.getOrNull() ?: false
+            }.getOrNull() ?: backupConditionForeground.get() ?: false
             val maxTemperature = if (foreground) {
                 CLOUD_FOREGROUND_MAX_TEMPERATURE_C
             } else {
@@ -961,11 +970,13 @@ class FeiniuBridgeHook : XposedModule() {
             val preference = BridgeReflect.newInstance(switchClass, context) ?: return result
             BridgeReflect.callMethod(preference, "setKey", MOBILE_DATA_PREFERENCE_KEY)
             BridgeReflect.callMethod(preference, "setTitle", mobileDataPreferenceTitle(context))
-            BridgeReflect.callMethod(preference, "setSummary", mobileDataPreferenceSummary(context))
+            val available = MobileDataBackupPolicy.availability.ready
+            BridgeReflect.callMethod(preference, "setEnabled", available)
+            BridgeReflect.callMethod(preference, "setSummary", if (available) mobileDataPreferenceSummary(context) else mobileDataUnavailableSummary(context))
             BridgeReflect.callMethod(preference, "setPersistent", false)
             val mobileDataEnabled = MobileDataBackupPolicy.isEnabled(context)
             BridgeReflect.callMethod(preference, "setChecked", mobileDataEnabled)
-            BridgeReflect.callMethod(
+            if (available) BridgeReflect.callMethod(
                 nasPreference,
                 "setSummary",
                 nasBackupNetworkSummary(mobileDataEnabled, context),
@@ -981,6 +992,7 @@ class FeiniuBridgeHook : XposedModule() {
             ) { _, method, args ->
                 when (method.name) {
                     "onPreferenceChange" -> {
+                        if (!MobileDataBackupPolicy.availability.ready) return@newProxyInstance false
                         val enabled = args?.getOrNull(1) as? Boolean ?: false
                         MobileDataBackupPolicy.setEnabled(context, enabled)
                         BridgeReflect.callMethod(
@@ -1010,6 +1022,9 @@ class FeiniuBridgeHook : XposedModule() {
 
     private object MobileDataBackupPolicy {
         @Volatile
+        var availability = MobileBackupAvailability()
+
+        @Volatile
         var networkMonitorClass: Class<*>? = null
 
         @Volatile
@@ -1029,6 +1044,7 @@ class FeiniuBridgeHook : XposedModule() {
         }
 
         fun isEnabled(explicitContext: Context? = null): Boolean {
+            if (!availability.ready) return false
             val resolved = explicitContext?.applicationContext ?: explicitContext ?: context ?: currentApplication()
             if (resolved != null) rememberContext(resolved)
             return resolved?.getSharedPreferences(MODULE_PREFERENCES, Context.MODE_PRIVATE)
@@ -1333,12 +1349,20 @@ class FeiniuBridgeHook : XposedModule() {
     companion object {
         private const val TAG = "ColorOSFeiniuBridge"
         private const val GALLERY_PACKAGE = "com.coloros.gallery3d"
-        private const val PRIVATE_LAN_TLS_CLASS = "com.oplus.aiunit.vision.ktc0"
+        private val PRIVATE_LAN_TLS_CLASSES = arrayOf(
+            "com.oplus.aiunit.vision.j6d0", // Gallery 16.50.8
+            "com.oplus.aiunit.vision.ktc0",
+        )
         private const val PRIVATE_LAN_TLS_METHOD = "k"
         private const val MAX_TOKEN_DECRYPT_DIAGNOSTIC_EVENTS = 20
         private const val BACKUP_PAUSE_REASON_CLASS =
             "com.oplus.gallery.framework.abilities.cloudsync.nas.backup.state.PauseReason"
+        private val CONTROL_FLAG_CHECKER_CLASSES = setOf(
+            "com.oplus.aiunit.vision.naq", // Gallery 16.50.8
+            "com.oplus.aiunit.vision.m1s", // Gallery 17.10.7
+        )
         private val NAS_BACKUP_STATE_INFO_CLASSES = arrayOf(
+            "com.oplus.aiunit.vision.wdq", // Gallery 16.50.8
             "com.oplus.aiunit.vision.stf",
             "com.oplus.aiunit.vision.o3q",
             "com.oplus.aiunit.vision.d4q",
@@ -1347,6 +1371,7 @@ class FeiniuBridgeHook : XposedModule() {
         private const val PAUSE_REASON_FIELD = "a"
         private const val NAS_NOTIFICATION_CONDITION_METHOD = "d"
         private val NAS_NOTIFICATION_CONDITION_CLASSES = arrayOf(
+            "com.oplus.aiunit.vision.wdq\$a", // Gallery 16.50.8
             "com.oplus.aiunit.vision.stf",
             "com.oplus.aiunit.vision.o3q\$a",
             "com.oplus.aiunit.vision.d4q\$a",
@@ -1354,6 +1379,7 @@ class FeiniuBridgeHook : XposedModule() {
         // The temperature provider and the NAS condition checkers are located dynamically; these
         // names only survive for the legacy fallback paths in [hookLegacyPauseReasonText].
         private val ACTIVITY_LIFECYCLE_CLASSES = arrayOf(
+            "com.oplus.aiunit.vision.k11", // Gallery 16.50.8
             "com.oplus.gallery.foundation.uikit.lifecycle.ActivityLifecycle",
             "com.oplus.aiunit.vision.c50",
         )
@@ -1361,6 +1387,8 @@ class FeiniuBridgeHook : XposedModule() {
         private const val NETWORK_MONITOR_CLASS =
             "com.oplus.gallery.standard_lib.util.network.NetworkMonitor"
         private val NAS_BACKUP_CONDITION_OBSERVER_CLASSES = arrayOf(
+            "com.oplus.gallery.framework.abilities.cloudsync.nas.backup.condition.NasBackupConditionObserver", // Gallery 17.10.7
+            "com.oplus.aiunit.vision.zaq", // Gallery 16.50.8
             "com.oplus.aiunit.vision.jsf",
             "com.oplus.aiunit.vision.k2q",
             "com.oplus.aiunit.vision.z2q",
@@ -1509,6 +1537,13 @@ class FeiniuBridgeHook : XposedModule() {
                 "Feiniu private cloud backup may use mobile data and incur charges"
             }
         }
+
+        private fun mobileDataUnavailableSummary(context: Context): String =
+            if (isChinese(context)) {
+                "当前相册版本的移动数据备份适配未完整生效，请更新模块并重启相册；详细原因见模块日志"
+            } else {
+                "Mobile backup is unavailable for this Gallery version. Update the module and restart Gallery; see module logs for details."
+            }
 
         private fun nasBackupNetworkSummary(
             mobileDataEnabled: Boolean,

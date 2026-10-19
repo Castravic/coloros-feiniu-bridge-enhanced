@@ -8,6 +8,8 @@
 /docs/superpowers/
 .kotlin/
 /outputs/
+/.review/
+/diagnostic-backups/
 /build/
 /app/build/
 *.iml

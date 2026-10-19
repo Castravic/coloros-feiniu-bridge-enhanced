@@ -150,17 +150,11 @@ if (-not $SkipLegacySourceEvidence) {
     Assert-Path (Join-Path $NewSources 'com\oplus\aiunit\vision\k3q.java') 'New Gallery state class k3q is missing'
 }
 
-Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.bsf' 'Hook source no longer covers old Gallery condition checker bsf'
 Assert-FileContains $KnownMappingsFile 'com\.oplus\.aiunit\.vision\.erq' 'Known mappings no longer cover old Gallery token decryptor erq'
-Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.vwp' 'Hook source no longer covers old Gallery temperature util vwp'
 Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.stf' 'Hook source no longer covers old Gallery state info stf'
-Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.otf\\\$h' 'Hook source no longer covers old Gallery paused state otf$h'
 
-Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.f0q' 'Hook source does not cover new Gallery condition checker f0q'
 Assert-FileContains $KnownMappingsFile 'com\.oplus\.aiunit\.vision\.in80' 'Known mappings do not cover new Gallery token decryptor in80'
-Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.l370' 'Hook source does not cover new Gallery temperature util l370'
 Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.o3q' 'Hook source does not cover new Gallery state info o3q'
-Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.k3q\\\$h' 'Hook source does not cover new Gallery paused state k3q$h'
 
 Assert-FileContains $KnownMappingsFile 'com\.oplus\.aiunit\.vision\.z0g' 'Known mappings no longer cover Gallery 16.40.8 Feiniu provider z0g'
 Assert-FileContains $KnownMappingsFile 'com\.oplus\.aiunit\.vision\.b6q' 'Known mappings no longer cover Gallery 16.40.8 NAS album cache b6q'
@@ -168,6 +162,13 @@ Assert-FileContains $KnownMappingsFile 'com\.oplus\.aiunit\.vision\.y8q' 'Known 
 Assert-FileContains $KnownMappingsFile 'com\.oplus\.aiunit\.vision\.n1g' 'Known mappings no longer cover Gallery 16.40.13 Feiniu provider n1g'
 Assert-FileContains $KnownMappingsFile 'com\.oplus\.aiunit\.vision\.q6q' 'Known mappings no longer cover Gallery 16.40.13 NAS album cache q6q'
 Assert-FileContains $KnownMappingsFile 'com\.oplus\.aiunit\.vision\.n9q' 'Known mappings no longer cover Gallery 16.40.13 statistic DTO n9q'
+
+# Temperature/checker/state discovery now uses stable DEX anchors rather than class-name arrays.
+$enhancementLocator = Join-Path $repo 'app/src/main/java/io/github/colorosfeiniu/bridge/resolver/EnhancementLocator.kt'
+Assert-FileContains $enhancementLocator 'NasBackupCondChk' 'Dynamic checker anchor is missing'
+Assert-FileContains $enhancementLocator 'debug.gallery.temperature.test' 'Dynamic temperature anchor is missing'
+Assert-FileContains $enhancementLocator 'nas_backup_paused' 'Dynamic pause text anchor is missing'
+Assert-FileContains $HookFile 'EnhancementLocator.locate' 'Enhancement locator is not wired'
 
 Assert-FileContains $SemanticResolverFile 'TokenDecryptor' 'Semantic resolver lacks the token decryptor anchor'
 Assert-FileContains $SemanticResolverFile 'AES/GCM/NoPadding' 'Semantic resolver lacks the AES/GCM token anchor'
@@ -220,11 +221,8 @@ if (-not [string]::IsNullOrWhiteSpace($Gallery164022Sources)) {
     Assert-FileContains $HookFile 'private LAN TLS compatibility activated' 'Hook source lacks the privacy-safe private-LAN TLS activation diagnostic'
 
     Assert-FileContains $KnownMappingsFile 'com\.oplus\.aiunit\.vision\.qp80' 'Known mappings do not cover Gallery 16.40.22 token decryptor qp80'
-    Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.u0q' 'Hook source does not cover Gallery 16.40.22 condition checker u0q'
     Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.d4q' 'Hook source does not cover Gallery 16.40.22 backup state d4q'
-    Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.z3q\\\$h' 'Hook source does not cover Gallery 16.40.22 paused state z3q$h'
     Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.d4q\\\$a' 'Hook source does not cover Gallery 16.40.22 notification state d4q$a'
-    Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.t570' 'Hook source does not cover Gallery 16.40.22 temperature utility t570'
     Assert-FileContains $HookFile 'com\.oplus\.aiunit\.vision\.z2q' 'Hook source does not cover Gallery 16.40.22 backup observer z2q'
 }
 

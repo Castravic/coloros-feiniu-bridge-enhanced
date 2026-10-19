@@ -6,6 +6,10 @@
 
 > 已验证环境：ColorOS 16 / Android 16 的相册（`16.35.10`、`16.40.8`、`16.40.13`、`16.40.22`）与 ColorOS 17 / Android 17 的设备空间。后续版本会先尝试已知映射与结构定位，但仍需真机确认厂商没有改写相关业务流程。
 
+相册 `16.50.8` 已完成真实 APK 的 DEX 定位及方法契约检查，尚未完成本轮真机上传验收；详见 [验证记录](docs/gallery-16.50.8-compatibility.md)。`17.9.24` 的动态定位有样例与可选真实 APK 测试，不能据此推断全部增强功能已经过真机验证。
+
+相册 `17.10.7` 已根据用户提供的真实 APK 补齐条件观察器适配，并验证 token、温控、条件检查与暂停文本的动态定位；详见 [17.10.7 验证记录](docs/gallery-17.10.7-compatibility.md)。该版本保留相册新 TLS 证书策略，仍需真机确认备份上传。
+
 ## 功能
 
 - 修复相册 / 设备空间调用 `cryptoeng` 失败后飞牛 token prefix 为空、无法连接的问题。
@@ -145,18 +149,18 @@ ColorOS 17 版本的相册若尚未验证，温控 / TLS 等精确映射会保�
 
 ## 构建
 
-需要 JDK 17、Android SDK 35 和 Gradle 8.7：
+需要 JDK 17 和 Android SDK 35；仓库内置固定 Gradle 8.7 版本及下载 SHA-256 校验的 Wrapper：
 
 ```bash
-gradle :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease
+./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease
 ```
 
 GitHub Actions 会在每次 push、pull request 和手动触发时自动构建。主线 push 和手动构建在配置完整签名 Secrets 后上传 signed release APK；未配置完整签名 Secrets 或 pull request 构建时上传 unsigned release APK。unsigned APK 不能直接安装，需要使用项目原有 release key 签名后发布。
 
-如果发布前需要仓库内置 Gradle Wrapper，可以在有 Gradle 的机器上执行一次：
+Windows PowerShell 使用：
 
 ```bash
-gradle wrapper --gradle-version 8.7
+.\gradlew.bat :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease
 ```
 
 输出位置：
@@ -210,6 +214,12 @@ app/build/outputs/apk/release/app-release-signed.apk
 ```
 
 该选项默认关闭。开启后，仅当 ColorOS 网络监视器确认当前移动网络已经通过联网验证时，私有云自动备份才会放行。
+
+当网络检查、NAS 条件作用域或条件刷新等依赖未安装完整时，开关会置灰并提示适配未完整生效。此前保存的选择会保留，但不会在依赖缺失时放行移动数据；更新模块并重启相册后重新检测。
+
+诊断日志 `mobile data backup capability ready=... missing=...` 会列出缺失依赖。`ready=true` 表示相关 Hook 已安装，不代表当前网络可用或照片已成功上传；其他暂停原因仍正常生效。
+
+CI 同时运行单测、源码契约检查和 debug/release 构建，并上传测试报告。源码契约检查只用于辅助核对，温控行为以生产 Hook 回归测试为准。
 
 ## 排查日志
 

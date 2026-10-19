@@ -29,18 +29,15 @@ $source = Get-Content -Raw -LiteralPath $FallbackFile
 $entryPoint = Get-Content -Raw -LiteralPath $EntryPointFile
 
 $requiredPatterns = @(
-    'GalleryVariant\("com\.oplus\.aiunit\.vision\.z0g", "com\.oplus\.aiunit\.vision\.b6q", "com\.oplus\.aiunit\.vision\.y8q"\)',
-    'GalleryVariant\("com\.oplus\.aiunit\.vision\.n1g", "com\.oplus\.aiunit\.vision\.q6q", "com\.oplus\.aiunit\.vision\.n9q"\)',
-    'private const val STAT_METHOD = "J"',
-    'private const val ALBUMS_METHOD = "l"',
-    'private const val CONNECTION_METHOD = "H"',
-    'private const val REAL_ALBUMS_METHOD = "F"',
+    'validated: ValidatedGalleryHooks',
+    'module\.hook\(validated\.stat\)\.intercept\(StatHook\(installed\)\)',
+    'module\.hook\(validated\.albums\)\.intercept\(AlbumsHook\(installed\)\)',
     'message\.startsWith\(STAT_FAILURE_PREFIX\)',
     'if \(message\.startsWith\(STAT_TIMEOUT_PREFIX\)\) return false',
     'statlessDevices\.add\(deviceId\)',
     'statlessDevices\.contains\(deviceId\)',
     'cached\.photos\.toLong\(\) \+ cached\.videos\.toLong\(\) <= 0L',
-    'invokeRealAlbums\(param\.thisObject, deviceId, limit, offset\)',
+    'invokeRealAlbums\(provider, deviceId, limit, offset\)',
     'gallery stat fallback used source=local-cache photos=',
     'gallery stat fallback cache unavailable; enabling real-albums mode',
     'gallery stat fallback real-albums result offset=',
@@ -53,7 +50,7 @@ foreach ($pattern in $requiredPatterns) {
     }
 }
 
-if ($entryPoint -notmatch 'GalleryStatFallback\.install\(lpparam\.classLoader\)') {
+if ($entryPoint -notmatch 'GalleryStatFallback\.install\(this, hooks\)') {
     throw 'Gallery package entry point does not install the stat fallback'
 }
 
