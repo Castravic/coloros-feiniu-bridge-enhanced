@@ -98,10 +98,15 @@ $null = Get-JavaMethodBody -Content $conditionCheckerContent -SignaturePattern $
 Assert-Condition -Condition ([regex]::IsMatch($u0qABody, '\br570\s*\.\s*a\s*\(\s*\)')) -Message 'Gallery 16.40.13 u0q.a method body no longer reads backup temperature through r570.a()'
 Assert-Condition -Condition ([regex]::IsMatch($temperatureUtilContent, 'public\s+static\s+final\s+float\s+a\s*\(\s*\)')) -Message 'Gallery 16.40.13 r570.a(): float shape does not match'
 
-$conditionCandidates = Get-KotlinArrayBody -Content $hookContent -ArrayName 'BACKUP_CONDITION_CHECKER_CLASSES' -Message 'Hook has no BACKUP_CONDITION_CHECKER_CLASSES array'
-$temperatureCandidates = Get-KotlinArrayBody -Content $hookContent -ArrayName 'TEMPERATURE_UTIL_CLASSES' -Message 'Hook has no TEMPERATURE_UTIL_CLASSES array'
-Assert-Condition -Condition ($conditionCandidates -match '"com\.oplus\.aiunit\.vision\.u0q"') -Message 'Hook does not cover Gallery 16.40.13 condition checker u0q in BACKUP_CONDITION_CHECKER_CLASSES'
-Assert-Condition -Condition ($temperatureCandidates -match '"com\.oplus\.aiunit\.vision\.r570"') -Message 'Hook does not cover Gallery 16.40.13 temperature utility r570 in TEMPERATURE_UTIL_CLASSES'
+$locator = Get-FileContent (Join-Path $repo 'app/src/main/java/io/github/colorosfeiniu/bridge/resolver/EnhancementLocator.kt')
+Assert-Condition ($locator.Contains('NasBackupCondChk')) 'Dynamic backup condition anchor is missing'
+Assert-Condition ($locator.Contains('debug.gallery.temperature.test')) 'Dynamic temperature anchor is missing'
+Assert-Condition ($hookContent.Contains('hooker = BackupConditionEvaluationScopeHook')) 'Dynamic backup scope is not installed'
+Assert-Condition ($hookContent.Contains('hooker = RelaxBackupTemperatureHook')) 'Dynamic temperature hook is not installed'
+Assert-Condition ($hookContent.Contains('chain.getArg(0) as? Boolean')) 'Checker fallback uses the wrong foreground argument'
+Assert-Condition ($hookContent.Contains('backupConditionForeground.set(hint)')) 'Checker foreground hint is not applied'
+Assert-Condition ($hookContent.Contains('backupConditionForeground.set(previousForeground)')) 'Nested checks do not restore the outer foreground flag'
+Assert-Condition ($hookContent.Contains('candidate.invoke(null) as Boolean')) 'Lifecycle foreground observation is missing'
 
 Assert-Condition -Condition ($hookContent -notmatch '\blastForeground\b') -Message 'Temperature hysteresis still contains lastForeground, so app state changes can incorrectly clear a high-temperature pause'
 $policyBody = Get-BracedBody -Content $hookContent -StartPattern 'private\s+object\s+CloudBackupTemperaturePolicy\s*' -Message 'Hook has no CloudBackupTemperaturePolicy object'

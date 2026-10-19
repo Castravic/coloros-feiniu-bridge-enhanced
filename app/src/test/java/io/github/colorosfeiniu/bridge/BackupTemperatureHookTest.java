@@ -12,14 +12,19 @@ import static org.junit.Assert.assertEquals;
 
 /** Runs the production scope hook and thermal policy against the NAS checker contract. */
 public class BackupTemperatureHookTest {
+    private Method checkerMethod;
     private Object evaluateThroughRealHook(boolean foreground, boolean forceRefresh) throws Throwable {
+        return evaluateThroughRealHook(foreground, forceRefresh, 44.0f, true);
+    }
+
+    private Object evaluateThroughRealHook(boolean foreground, boolean forceRefresh, float temperature, boolean reset) throws Throwable {
         Class<?> policyClass = Class.forName("io.github.colorosfeiniu.bridge.FeiniuBridgeHook$CloudBackupTemperaturePolicy");
         Field instance = policyClass.getDeclaredField("INSTANCE");
         instance.setAccessible(true);
         Object policy = instance.get(null);
         Field blocked = policyClass.getDeclaredField("blocked");
         blocked.setAccessible(true);
-        blocked.set(null, false);
+        if (reset) blocked.set(null, false);
         Method evaluate = policyClass.getDeclaredMethod("evaluate", float.class);
         evaluate.setAccessible(true);
         Class<?> scopeClass = Class.forName("io.github.colorosfeiniu.bridge.FeiniuBridgeHook$BackupConditionEvaluationScopeHook");
@@ -29,7 +34,8 @@ public class BackupTemperatureHookTest {
         Chain chain = (Chain) Proxy.newProxyInstance(Chain.class.getClassLoader(), new Class<?>[] { Chain.class },
             (proxy, method, args) -> {
                 if (method.getName().equals("getArg")) return ((Integer) args[0]) == 0 ? foreground : forceRefresh;
-                if (method.getName().equals("proceed")) return evaluate.invoke(policy, 44.0f);
+                if (method.getName().equals("getExecutable")) return checkerMethod;
+                if (method.getName().equals("proceed")) return evaluate.invoke(policy, temperature);
                 return null;
             });
         return hooker.intercept(chain);
@@ -65,6 +71,54 @@ public class BackupTemperatureHookTest {
         threadLocal("backupConditionEvaluationDepth").remove();
         threadLocal("backupConditionForeground").remove();
         threadLocal("mobileNetworkEvaluationDepth").remove();
+        Class<?> policy = Class.forName("io.github.colorosfeiniu.bridge.FeiniuBridgeHook$CloudBackupTemperaturePolicy");
+        Field lifecycle = policy.getDeclaredField("activityLifecycleMethod");
+        lifecycle.setAccessible(true);
+        lifecycle.set(null, null);
+    }
+
+    private static boolean actualForeground;
+    public static boolean lifecycleForeground() { return actualForeground; }
+
+    @Test public void actualLifecycleWinsOverRefreshAndBackgroundCheckFlags() throws Throwable {
+        Class<?> policy = Class.forName("io.github.colorosfeiniu.bridge.FeiniuBridgeHook$CloudBackupTemperaturePolicy");
+        Field lifecycle = policy.getDeclaredField("activityLifecycleMethod");
+        lifecycle.setAccessible(true);
+        lifecycle.set(null, BackupTemperatureHookTest.class.getMethod("lifecycleForeground"));
+        for (boolean foreground : new boolean[] { false, true }) {
+            actualForeground = foreground;
+            for (boolean refresh : new boolean[] { false, true }) {
+                for (boolean backgroundCheck : new boolean[] { false, true }) {
+                    Object decision = evaluateThroughRealHook(refresh, backgroundCheck);
+                    assertEquals(foreground, property(decision, "getForeground"));
+                    assertEquals(foreground, property(decision, "getAllow"));
+                }
+            }
+        }
+    }
+
+    @Test public void thresholdsAreInclusiveAndPausePersistsUntil41() throws Throwable {
+        for (boolean foreground : new boolean[] { false, true }) {
+            float threshold = foreground ? 45.0f : 43.0f;
+            assertEquals(true, property(evaluateThroughRealHook(foreground, false, threshold, true), "getAllow"));
+            assertEquals(false, property(evaluateThroughRealHook(foreground, false, threshold + 0.1f, false), "getAllow"));
+            assertEquals(false, property(evaluateThroughRealHook(true, true, 42.0f, false), "getAllow"));
+            assertEquals(true, property(evaluateThroughRealHook(foreground, false, 41.0f, false), "getAllow"));
+            assertEquals(true, property(evaluateThroughRealHook(foreground, false, 42.0f, false), "getAllow"));
+        }
+    }
+
+    @Test public void controlFlagsCannotSelectForegroundWhenLifecycleIsUnavailable() throws Throwable {
+        for (Class<?> checker : new Class<?>[] { com.oplus.aiunit.vision.naq.class, com.oplus.aiunit.vision.m1s.class }) {
+            checkerMethod = checker.getMethod("a", boolean.class, boolean.class);
+            for (boolean refresh : new boolean[] { false, true }) {
+                for (boolean skipCheck : new boolean[] { false, true }) {
+                    Object decision = evaluateThroughRealHook(refresh, skipCheck);
+                    assertEquals(false, property(decision, "getForeground"));
+                    assertEquals(false, property(decision, "getAllow"));
+                }
+            }
+        }
     }
 
     @Test public void refreshFlagDoesNotChangeForegroundLimit() throws Throwable {

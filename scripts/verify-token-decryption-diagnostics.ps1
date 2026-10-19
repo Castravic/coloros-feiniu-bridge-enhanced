@@ -21,10 +21,11 @@ if (-not (Test-Path -LiteralPath $HookFile)) {
 $source = Get-Content -Raw -LiteralPath $HookFile
 
 $requiredPatterns = @(
-    'private const val TOKEN_DECRYPT_METHOD = "b"',
+    'installTokenDiagnostics\(target\.decryptMethods\)',
+    'installTokenDiagnostics\(listOf\(hooks\.decrypt\)\)',
+    'hook\(method\)\.intercept\(TokenDecryptionDiagnosticHook\)',
+    'MAX_TOKEN_DECRYPT_DIAGNOSTIC_EVENTS',
     'private object TokenDecryptionDiagnosticHook',
-    'method\.returnType == String::class\.java',
-    'arrayOf\(String::class\.java, String::class\.java\)',
     'token decrypt result=success len=',
     'token decrypt result=empty',
     'token decrypt result=error type='
