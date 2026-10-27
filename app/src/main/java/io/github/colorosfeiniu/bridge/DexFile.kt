@@ -180,7 +180,8 @@ internal class DexFile private constructor(private val data: ByteArray) {
         private val methods: List<DexMethod> by lazy { readMethods() }
 
         /** Declared methods of this class only, as name/descriptor/access tuples. */
-        fun methodShapes(): List<MethodShape> = methods.map { method ->
+        fun methodShapes(): List<MethodShape> = methods.mapNotNull { method ->
+            if (!method.hasValidReference) return@mapNotNull null
             MethodShape(method.name, method.descriptor, method.accessFlags, method.fieldRefs())
         }
 
@@ -228,8 +229,8 @@ internal class DexFile private constructor(private val data: ByteArray) {
                     val codeOffset = reader.uleb128()
                     if (diff < 0 || codeOffset < 0) return result
                     methodIndex += diff
-                    methodRef(methodIndex)?.let { (name, descriptor) ->
-                        result += DexMethod(name, descriptor, accessFlags, codeOffset)
+                    if (methodIndex in 0 until methodIdsSize) {
+                        result += DexMethod(methodIndex, accessFlags, codeOffset)
                     }
                 }
             }
@@ -238,11 +239,15 @@ internal class DexFile private constructor(private val data: ByteArray) {
     }
 
     private inner class DexMethod(
-        val name: String,
-        val descriptor: String,
+        private val methodIndex: Int,
         val accessFlags: Int,
         private val codeOffset: Int,
     ) {
+        // Anchor scans need only code offsets; decode signatures only for matching classes.
+        private val reference by lazy { methodRef(methodIndex) }
+        val hasValidReference: Boolean get() = reference != null
+        val name: String get() = reference?.first.orEmpty()
+        val descriptor: String get() = reference?.second.orEmpty()
         fun referencesString(stringIndex: Int): Boolean {
             if (codeOffset <= 0 || codeOffset + CODE_ITEM_HEADER_SIZE > data.size) return false
             val units = data.uintAt(codeOffset + CODE_ITEM_INSNS_SIZE)

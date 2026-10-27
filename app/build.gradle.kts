@@ -14,12 +14,21 @@ android {
     compileSdk = 35
     buildToolsVersion = "35.0.0"
 
+    buildFeatures {
+        buildConfig = true
+    }
+
     defaultConfig {
         applicationId = "io.github.colorosfeiniu.bridge"
         minSdk = 26
         targetSdk = 35
-        versionCode = 17
-        versionName = "0.4.2"
+        versionCode = 18
+        versionName = "0.4.3"
+        buildConfigField(
+            "boolean",
+            "REFRESH_DIAGNOSTICS",
+            providers.gradleProperty("refreshDiagnostics").orElse("false").get().toBooleanStrict().toString(),
+        )
     }
 
     if (

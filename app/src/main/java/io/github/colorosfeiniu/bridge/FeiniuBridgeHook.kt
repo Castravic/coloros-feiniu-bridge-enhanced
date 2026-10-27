@@ -47,6 +47,10 @@ class FeiniuBridgeHook : XposedModule() {
 
         val packageName = param.packageName
         val profile = TokenDecryptorTargets.forPackage(packageName) ?: return
+        if (packageName == GALLERY_PACKAGE) {
+            StartupRefreshDiagnostics.start { message -> logInfo(message) }
+            LocalMediaObserverDiagnostics.install(this, param.classLoader)
+        }
         val classLoader = param.classLoader
         val appInfo = param.applicationInfo
 
@@ -79,7 +83,8 @@ class FeiniuBridgeHook : XposedModule() {
         runCatching {
             target.methods.forEach { method ->
                 method.isAccessible = true
-                hook(method).intercept { chain -> interceptPrefixCall(chain, appInfo) }
+                val session = PrefixFallbackSession()
+                hook(method).intercept { chain -> interceptPrefixCall(chain, appInfo, session) }
             }
             logInfo("installed for $packageName class=${target.className} via=${target.source}")
             installTokenDiagnostics(target.decryptMethods)
@@ -168,7 +173,12 @@ class FeiniuBridgeHook : XposedModule() {
         appInfo: ApplicationInfo,
         classLoader: ClassLoader,
     ) {
-        val enhancements = resolveGalleryEnhancements(context, appInfo, classLoader)
+        if (context != null) {
+            LocalMediaStartupRecovery.install(this, context, classLoader) { message -> logInfo(message) }
+        }
+        val enhancements = StartupRefreshDiagnostics.measure("enhancement-resolution") {
+            resolveGalleryEnhancements(context, appInfo, classLoader)
+        }
         installBackupPauseDiagnostics(classLoader, enhancements)
         val conditionScopeHooks = installBackupTemperatureCompatibility(classLoader, enhancements)
         installBackupPauseReasonText(classLoader, enhancements)
@@ -334,7 +344,8 @@ class FeiniuBridgeHook : XposedModule() {
         source: ResolutionSource,
     ) {
         hooks.prefix.isAccessible = true
-        hook(hooks.prefix).intercept { chain -> interceptPrefixCall(chain, appInfo) }
+        val session = PrefixFallbackSession()
+        hook(hooks.prefix).intercept { chain -> interceptPrefixCall(chain, appInfo, session) }
         installTokenDiagnostics(listOf(hooks.decrypt))
         logInfo("prefix fallback installed source=${source.name.lowercase()}")
     }
@@ -353,22 +364,19 @@ class FeiniuBridgeHook : XposedModule() {
         if (installed > 0) logInfo("token decryption diagnostics installed methods=$installed")
     }
 
-    private fun interceptPrefixCall(chain: Chain, appInfo: ApplicationInfo): Any? {
-        val result = runCatching { chain.proceed() }
-        val error = result.exceptionOrNull()
-        // An Error says the process itself is in trouble; only the loader's own failures fall back.
-        if (error is Error) throw error
-
-        val decision = PrefixFallbackDecision.decide(
-            returned = result.getOrNull(),
-            error = error,
+    private fun interceptPrefixCall(
+        chain: Chain,
+        appInfo: ApplicationInfo,
+        session: PrefixFallbackSession,
+    ): Any? {
+        val decision = session.resolve(
+            loader = { StartupRefreshDiagnostics.measure("prefix-loader") { chain.proceed() } },
             fallback = { PrefixResolver.resolve(appInfo) { message -> logInfo(message) } },
+            onLoaderFailure = { error -> logLoaderThrow(error) },
         )
-
         return when (decision) {
             is PrefixFallbackDecision.Outcome.Passthrough -> decision.value
             is PrefixFallbackDecision.Outcome.Supply -> {
-                logLoaderThrow(error)
                 if (shouldLogFallback()) {
                     val prefix = decision.prefix
                     logInfo(
@@ -378,7 +386,6 @@ class FeiniuBridgeHook : XposedModule() {
                 decision.prefix.value
             }
             is PrefixFallbackDecision.Outcome.Rethrow -> {
-                logLoaderThrow(decision.error)
                 logWarn("prefix fallback unavailable")
                 throw decision.error
             }

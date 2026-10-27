@@ -39,7 +39,7 @@ internal object GalleryStatFallback {
             val deviceId = chain.getArg(1) as? String ?: return chain.proceed()
 
             val result = try {
-                chain.proceed()
+                StartupRefreshDiagnostics.measure("gallery-stat") { chain.proceed() }
             } catch (error: Throwable) {
                 if (!isEligibleStatFailure(error)) throw error
 
@@ -101,7 +101,7 @@ internal object GalleryStatFallback {
             }
 
             try {
-                return chain.proceed()
+                return StartupRefreshDiagnostics.measure("gallery-albums") { chain.proceed() }
             } catch (original: Throwable) {
                 if (deviceId == null || !isEligibleStatFailure(original)) throw original
 

@@ -28,7 +28,7 @@ jobs:
         uses: gradle/actions/wrapper-validation@v4
 
       - name: Build APKs
-        run: bash ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease
+        run: bash ./gradlew :app:testDebugUnitTest :app:testReleaseUnitTest :app:assembleDebug :app:assembleRelease
 
       - name: Verify source contracts
         shell: pwsh
@@ -46,6 +46,8 @@ jobs:
           path: |
             app/build/reports/tests/testDebugUnitTest/
             app/build/test-results/testDebugUnitTest/
+            app/build/reports/tests/testReleaseUnitTest/
+            app/build/test-results/testReleaseUnitTest/
 
       - name: Check release signing configuration
         id: signing
