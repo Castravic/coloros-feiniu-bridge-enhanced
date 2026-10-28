@@ -10,6 +10,8 @@
 
 相册 `17.10.7` 已根据用户提供的真实 APK 补齐条件观察器适配，并验证 token、温控、条件检查与暂停文本的动态定位；详见 [17.10.7 验证记录](docs/gallery-17.10.7-compatibility.md)。该版本保留相册新 TLS 证书策略，仍需真机确认备份上传。
 
+`0.4.3` 修复了相册关闭期间新增图片后，首次打开本地相册漏刷新、需要切后台再返回的问题。修复限定相册 `16.50.8` / `17.10.7` 的已验证方法契约，用户已确认本次试修复有效；详见 [本地冷启动刷新验证](docs/validation/first-refresh-delay.md)。
+
 ## 功能
 
 - 修复相册 / 设备空间调用 `cryptoeng` 失败后飞牛 token prefix 为空、无法连接的问题。
@@ -23,6 +25,7 @@
 - 使用与 ColorOS 官方云备份一致的温控策略：前台高于 45°C 暂停、后台高于 43°C 暂停、降至 41°C 或以下恢复。
 - 首页下拉区域显示飞牛私有云备份暂停的具体原因。
 - 在相册设置中增加「允许私有云备份使用移动数据」选项。
+- 在本地同步监听器错过首次前台事件时补调一次原生同步入口，恢复冷启动前新增图片的显示。
 - 基于现代 libxposed API 102 实现；内置静态作用域声明（相册 + 设备空间）。
 
 ## 实现原理
@@ -39,7 +42,7 @@ SHA-256(prefix + deviceId)
 
 - 如果原方法已经成功返回 prefix，模块不做任何修改。
 - 如果原方法返回空或 `null`，模块从目标 APK 的 dex 字符串池中解析飞牛 prefix 并返回给调用方。
-- 调用方随后继续执行它自己的 token 解密和 NAS 连接流程。
+- 补出的 prefix 在当前进程内按加载方法缓存；后续调用复用该值，避免每次解密重复访问失败的硬件接口。进程重启后重新优先尝试系统原路径。调用方随后继续执行它自己的 token 解密和 NAS 连接流程。
 
 模块不会伪造 token，不会伪造连接对象，也不会跳过飞牛服务端认证。它只恢复原有链路缺失的本地 prefix 值。
 
@@ -222,6 +225,8 @@ app/build/outputs/apk/release/app-release-signed.apk
 CI 同时运行单测、源码契约检查和 debug/release 构建，并上传测试报告。源码契约检查只用于辅助核对，温控行为以生产 Hook 回归测试为准。
 
 ## 排查日志
+
+本地刷新线程采样和通知追踪默认关闭。需要采集时，可构建 `./gradlew :app:assembleDebug -PrefreshDiagnostics=true`；仅 Debug 包启用启动后 90 秒的限时诊断，正式 Release 不启动采样。
 
 ```bash
 adb shell logcat | grep -iE 'ColorOSFeiniuBridge|FeiniuNasSDK|TokenDecryptor|FNNetworkConnection|FeiNiuScannerImpl|NasAlbum|cryptoeng'
