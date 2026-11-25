@@ -28,6 +28,10 @@ internal class ConnectionResolutionCache(
         preferences.edit().putString(galleryKey, encodeGallery(refs).toString()).apply()
     }
 
+    fun hasToken(): Boolean = preferences.contains(tokenKey)
+
+    fun hasGallery(): Boolean = preferences.contains(galleryKey)
+
     fun invalidateToken() {
         preferences.edit().remove(tokenKey).apply()
     }

@@ -109,7 +109,11 @@ public class BackupTemperatureHookTest {
     }
 
     @Test public void controlFlagsCannotSelectForegroundWhenLifecycleIsUnavailable() throws Throwable {
-        for (Class<?> checker : new Class<?>[] { com.oplus.aiunit.vision.naq.class, com.oplus.aiunit.vision.m1s.class }) {
+        for (Class<?> checker : new Class<?>[] {
+            com.oplus.aiunit.vision.naq.class,
+            com.oplus.aiunit.vision.m1s.class,
+            com.oplus.aiunit.vision.bzr.class,
+        }) {
             checkerMethod = checker.getMethod("a", boolean.class, boolean.class);
             for (boolean refresh : new boolean[] { false, true }) {
                 for (boolean skipCheck : new boolean[] { false, true }) {

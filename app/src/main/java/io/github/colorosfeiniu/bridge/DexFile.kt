@@ -34,9 +34,51 @@ internal class DexFile private constructor(private val data: ByteArray) {
         return null
     }
 
+    /**
+     * Scans the string pool for the first string containing [needle] and matching [predicate],
+     * avoiding `String` allocations until [needle] actually matches the raw UTF-8 span.
+     */
+    fun firstStringContaining(needle: String, predicate: (String) -> Boolean): String? {
+        if (!usable || needle.isEmpty()) return null
+        if (!isAscii(needle)) return firstString { it.contains(needle) && predicate(it) }
+
+        val needleBytes = needle.toByteArray(Charsets.US_ASCII)
+        if (!containsAsciiBytes(needleBytes)) return null
+
+        for (index in 0 until stringIdsSize) {
+            val span = stringByteSpan(index)
+            if (span < 0L) continue
+            val start = (span ushr 32).toInt()
+            val end = span.toInt()
+            if (end - start < needleBytes.size) continue
+            if (!spanContainsBytes(start, end, needleBytes)) continue
+            val value = runCatching { String(data, start, end - start, Charsets.UTF_8) }.getOrNull()
+                ?: continue
+            if (predicate(value)) return value
+        }
+        return null
+    }
+
     /** Pool index of [value], or -1 when the string is absent. */
     fun indexOfString(value: String): Int {
         if (!usable) return -1
+        if (isAscii(value)) {
+            val needle = value.toByteArray(Charsets.US_ASCII)
+            for (index in 0 until stringIdsSize) {
+                val start = stringDataStart(index)
+                if (start < 0 || start + needle.size >= data.size) continue
+                if (data[start] != needle[0] || data[start + needle.size].toInt() != 0) continue
+                var matched = true
+                for (i in 1 until needle.size) {
+                    if (data[start + i] != needle[i]) {
+                        matched = false
+                        break
+                    }
+                }
+                if (matched) return index
+            }
+            return -1
+        }
         for (index in 0 until stringIdsSize) {
             if (string(index) == value) return index
         }
@@ -68,34 +110,66 @@ internal class DexFile private constructor(private val data: ByteArray) {
         if (entry < 0 || entry + CLASS_DEF_SIZE > data.size) return null
         val descriptor = typeDescriptor(data.uintAt(entry)) ?: return null
         val classDataOffset = data.uintAt(entry + CLASS_DEF_DATA_OFFSET)
+        val interfacesOffset = data.uintAt(entry + CLASS_DEF_INTERFACES)
         val superName = data.uintAt(entry + CLASS_DEF_SUPERCLASS).let { superIndex ->
             if (superIndex == NO_INDEX) null else typeDescriptor(superIndex)?.toClassName()
         }
-        return DexClass(descriptor, superName, classDataOffset)
+        return DexClass(descriptor, superName, interfacesOffset, classDataOffset)
     }
 
     private fun string(index: Int): String? {
-        if (index < 0 || index >= stringIdsSize) return null
-        val idOffset = stringIdsOffset + index * STRING_ID_SIZE
-        if (idOffset < 0 || idOffset + STRING_ID_SIZE > data.size) return null
-        return stringAt(data.uintAt(idOffset))
+        val span = stringByteSpan(index)
+        if (span < 0L) return null
+        val start = (span ushr 32).toInt()
+        val end = span.toInt()
+        return runCatching { String(data, start, end - start, Charsets.UTF_8) }.getOrNull()
     }
 
-    private fun stringAt(offset: Int): String? {
-        if (offset < 0 || offset >= data.size) return null
+    private fun stringDataStart(index: Int): Int {
+        if (index < 0 || index >= stringIdsSize) return -1
+        val idOffset = stringIdsOffset + index * STRING_ID_SIZE
+        if (idOffset < 0 || idOffset + STRING_ID_SIZE > data.size) return -1
+        val offset = data.uintAt(idOffset)
+        if (offset < 0 || offset >= data.size) return -1
         var cursor = offset
         while (cursor < data.size) {
             val byte = data[cursor].toInt() and 0xff
             cursor++
             if (byte and 0x80 == 0) break
         }
-        if (cursor >= data.size) return null
+        return if (cursor >= data.size) -1 else cursor
+    }
 
-        val start = cursor
+    private fun stringByteSpan(index: Int): Long {
+        val start = stringDataStart(index)
+        if (start < 0) return -1L
+        var cursor = start
         while (cursor < data.size && data[cursor].toInt() != 0) cursor++
-        if (cursor > data.size || cursor == start) return null
+        if (cursor > data.size || cursor == start) return -1L
+        return (start.toLong() shl 32) or (cursor.toLong() and 0xffffffffL)
+    }
 
-        return runCatching { String(data, start, cursor - start, Charsets.UTF_8) }.getOrNull()
+    private fun isAscii(value: String): Boolean =
+        value.isNotEmpty() && value.all { it.code in 1..127 }
+
+    private fun containsAsciiBytes(needle: ByteArray): Boolean =
+        spanContainsBytes(0, data.size, needle)
+
+    private fun spanContainsBytes(start: Int, end: Int, needle: ByteArray): Boolean {
+        val len = needle.size
+        if (len == 0 || end - start < len) return false
+        val first = needle[0]
+        val limit = end - len
+        var pos = start
+        while (pos <= limit) {
+            if (data[pos] == first) {
+                var i = 1
+                while (i < len && data[pos + i] == needle[i]) i++
+                if (i == len) return true
+            }
+            pos++
+        }
+        return false
     }
 
     private fun typeDescriptor(index: Int): String? {
@@ -117,9 +191,9 @@ internal class DexFile private constructor(private val data: ByteArray) {
 
         val parameters = StringBuilder()
         val count = data.uintAt(parametersOffset)
+        if (count < 0 || parametersOffset + 4 + count.toLong() * 2L > data.size) return null
         for (position in 0 until count) {
             val at = parametersOffset + 4 + position * 2
-            if (at + 2 > data.size) return null
             parameters.append(typeDescriptor(data.ushortAt(at)) ?: return null)
         }
         return "($parameters)$returnType"
@@ -136,6 +210,15 @@ internal class DexFile private constructor(private val data: ByteArray) {
         return FieldRef(owner, name, type)
     }
 
+    private fun fieldShape(index: Int, accessFlags: Int): FieldShape? {
+        if (index < 0 || index >= fieldIdsSize) return null
+        val entry = fieldIdsOffset + index * FIELD_ID_SIZE
+        if (entry < 0 || entry + FIELD_ID_SIZE > data.size) return null
+        val typeDescriptor = typeDescriptor(data.ushortAt(entry + FIELD_ID_TYPE)) ?: return null
+        val name = string(data.uintAt(entry + FIELD_ID_NAME)) ?: return null
+        return FieldShape(name, typeDescriptor, accessFlags)
+    }
+
     /** Resolves a `method_id` into its name and `(params)return` descriptor. */
     private fun methodRef(index: Int): Pair<String, String>? {
         if (index < 0 || index >= methodIdsSize) return null
@@ -144,6 +227,16 @@ internal class DexFile private constructor(private val data: ByteArray) {
         val proto = protoDescriptor(data.ushortAt(entry + METHOD_ID_PROTO)) ?: return null
         val name = string(data.uintAt(entry + METHOD_ID_NAME)) ?: return null
         return name to proto
+    }
+
+    private fun methodInvokeRef(index: Int): MethodInvokeRef? {
+        if (index < 0 || index >= methodIdsSize) return null
+        val entry = methodIdsOffset + index * METHOD_ID_SIZE
+        if (entry < 0 || entry + METHOD_ID_SIZE > data.size) return null
+        val owner = typeDescriptor(data.ushortAt(entry))?.toClassName() ?: return null
+        val proto = protoDescriptor(data.ushortAt(entry + METHOD_ID_PROTO)) ?: return null
+        val name = string(data.uintAt(entry + METHOD_ID_NAME)) ?: return null
+        return MethodInvokeRef(owner, name, proto)
     }
 
     /**
@@ -155,6 +248,23 @@ internal class DexFile private constructor(private val data: ByteArray) {
         val owner: String,
         val name: String,
         val type: String,
+    )
+
+    /** A field declared by a class, with its type descriptor and access flags. */
+    data class FieldShape(
+        val name: String,
+        val typeDescriptor: String,
+        val accessFlags: Int,
+    ) {
+        val typeName: String get() = typeDescriptor.toClassName()
+        val isStatic: Boolean get() = accessFlags and ACC_STATIC != 0
+    }
+
+    /** A method target referenced by an `invoke-*` opcode inside a method body. */
+    data class MethodInvokeRef(
+        val owner: String,
+        val name: String,
+        val descriptor: String,
     )
 
     /** A method as declared by a class, with the access flags the locators filter on. */
@@ -171,11 +281,15 @@ internal class DexFile private constructor(private val data: ByteArray) {
         val descriptor: String,
         /** Superclass class name, or null for `java.lang.Object` and unresolved entries. */
         val superClassName: String?,
+        private val interfacesOffset: Int,
         private val classDataOffset: Int,
     ) {
         /** `Lcom/oplus/aiunit/vision/qp80;` becomes `com.oplus.aiunit.vision.qp80`. */
         val className: String
             get() = descriptor.toClassName()
+
+        /** Implemented interfaces as dot-separated class names. */
+        val interfaceNames: List<String> by lazy { readInterfaces() }
 
         private val methods: List<DexMethod> by lazy { readMethods() }
 
@@ -185,11 +299,51 @@ internal class DexFile private constructor(private val data: ByteArray) {
             MethodShape(method.name, method.descriptor, method.accessFlags, method.fieldRefs())
         }
 
+        /** Declared static and instance fields of this class. */
+        fun fieldShapes(): List<FieldShape> {
+            if (classDataOffset <= 0 || classDataOffset >= data.size) return emptyList()
+            val reader = Reader(classDataOffset)
+            val staticFields = reader.uleb128()
+            val instanceFields = reader.uleb128()
+            val directMethods = reader.uleb128()
+            val virtualMethods = reader.uleb128()
+            if (staticFields < 0 || instanceFields < 0 || directMethods < 0 || virtualMethods < 0) {
+                return emptyList()
+            }
+
+            val result = mutableListOf<FieldShape>()
+            for (count in listOf(staticFields, instanceFields)) {
+                var fieldIndex = 0
+                repeat(count) {
+                    val diff = reader.uleb128()
+                    val accessFlags = reader.uleb128()
+                    if (diff < 0 || accessFlags < 0) return result
+                    fieldIndex += diff
+                    fieldShape(fieldIndex, accessFlags)?.let(result::add)
+                }
+            }
+            return result
+        }
+
         fun declaresMethod(name: String, descriptor: String): Boolean =
             methods.any { it.name == name && it.descriptor == descriptor }
 
         fun referencesString(stringIndex: Int): Boolean =
             stringIndex >= 0 && methods.any { it.referencesString(stringIndex) }
+
+        /** Declared methods whose bodies load [stringIndex], decoded lazily on match only. */
+        fun methodsReferencingString(stringIndex: Int): List<MethodShape> {
+            if (stringIndex < 0) return emptyList()
+            return methods.mapNotNull { method ->
+                if (!method.referencesString(stringIndex) || !method.hasValidReference) return@mapNotNull null
+                MethodShape(method.name, method.descriptor, method.accessFlags, emptyList())
+            }
+        }
+
+        /** Method invocations inside declared methods matching [name] and [descriptor]. */
+        fun methodInvokes(name: String, descriptor: String): List<MethodInvokeRef> =
+            methods.filter { it.name == name && it.descriptor == descriptor }
+                .flatMap { it.invokedMethodRefs() }
 
         /** The subset of [stringIndices] whose value this class's own methods load. */
         fun referencedStrings(stringIndices: Collection<Int>): Set<String> {
@@ -200,6 +354,18 @@ internal class DexFile private constructor(private val data: ByteArray) {
                 method.constStringIndices().forEach { index ->
                     if (index in wanted) string(index)?.let(result::add)
                 }
+            }
+            return result
+        }
+
+        private fun readInterfaces(): List<String> {
+            if (interfacesOffset <= 0 || interfacesOffset + 4 > data.size) return emptyList()
+            val count = data.uintAt(interfacesOffset)
+            if (count <= 0 || interfacesOffset + 4 + count.toLong() * 2L > data.size) return emptyList()
+            val result = ArrayList<String>(count)
+            for (position in 0 until count) {
+                val typeIdx = data.ushortAt(interfacesOffset + 4 + position * 2)
+                typeDescriptor(typeIdx)?.toClassName()?.let(result::add)
             }
             return result
         }
@@ -248,27 +414,26 @@ internal class DexFile private constructor(private val data: ByteArray) {
         val hasValidReference: Boolean get() = reference != null
         val name: String get() = reference?.first.orEmpty()
         val descriptor: String get() = reference?.second.orEmpty()
-        fun referencesString(stringIndex: Int): Boolean {
-            if (codeOffset <= 0 || codeOffset + CODE_ITEM_HEADER_SIZE > data.size) return false
-            val units = data.uintAt(codeOffset + CODE_ITEM_INSNS_SIZE)
-            if (units <= 0) return false
-            val start = codeOffset + CODE_ITEM_HEADER_SIZE
-            val end = start + units * 2
-            if (end > data.size) return false
 
-            var cursor = start
-            while (cursor + 2 <= end) {
-                val opcode = data[cursor].toInt() and 0xff
+        fun referencesString(stringIndex: Int): Boolean {
+            var matched = false
+            walkInstructions { cursor, end, opcode ->
                 when {
                     opcode == OP_CONST_STRING && cursor + 4 <= end ->
-                        if (data.ushortAt(cursor + 2) == stringIndex) return true
+                        if (data.ushortAt(cursor + 2) == stringIndex) {
+                            matched = true
+                            return@walkInstructions false
+                        }
 
                     opcode == OP_CONST_STRING_JUMBO && cursor + 6 <= end ->
-                        if (data.uintAt(cursor + 2) == stringIndex) return true
+                        if (data.uintAt(cursor + 2) == stringIndex) {
+                            matched = true
+                            return@walkInstructions false
+                        }
                 }
-                cursor += instructionUnits(opcode) * 2
+                true
             }
-            return false
+            return matched
         }
 
         /** Every `field_id` this method reads or writes, resolved to owner/name/type. */
@@ -278,38 +443,20 @@ internal class DexFile private constructor(private val data: ByteArray) {
 
         /** Indices of every field-access operand in this method's code item. */
         fun fieldRefIndices(): List<Int> {
-            if (codeOffset <= 0 || codeOffset + CODE_ITEM_HEADER_SIZE > data.size) return emptyList()
-            val units = data.uintAt(codeOffset + CODE_ITEM_INSNS_SIZE)
-            if (units <= 0) return emptyList()
-            val start = codeOffset + CODE_ITEM_HEADER_SIZE
-            val end = start + units * 2
-            if (end > data.size) return emptyList()
-
             val result = ArrayList<Int>()
-            var cursor = start
-            while (cursor + 2 <= end) {
-                val opcode = data[cursor].toInt() and 0xff
+            walkInstructions { cursor, end, opcode ->
                 if (opcode in OP_IGET..OP_SPUT_SHORT && cursor + 4 <= end) {
                     result += data.ushortAt(cursor + 2)
                 }
-                cursor += instructionUnits(opcode) * 2
+                true
             }
             return result
         }
 
         /** Indices of every `const-string` operand in this method's code item. */
         fun constStringIndices(): List<Int> {
-            if (codeOffset <= 0 || codeOffset + CODE_ITEM_HEADER_SIZE > data.size) return emptyList()
-            val units = data.uintAt(codeOffset + CODE_ITEM_INSNS_SIZE)
-            if (units <= 0) return emptyList()
-            val start = codeOffset + CODE_ITEM_HEADER_SIZE
-            val end = start + units * 2
-            if (end > data.size) return emptyList()
-
             val result = ArrayList<Int>()
-            var cursor = start
-            while (cursor + 2 <= end) {
-                val opcode = data[cursor].toInt() and 0xff
+            walkInstructions { cursor, end, opcode ->
                 when {
                     opcode == OP_CONST_STRING && cursor + 4 <= end ->
                         result += data.ushortAt(cursor + 2)
@@ -317,9 +464,73 @@ internal class DexFile private constructor(private val data: ByteArray) {
                     opcode == OP_CONST_STRING_JUMBO && cursor + 6 <= end ->
                         result += data.uintAt(cursor + 2)
                 }
-                cursor += instructionUnits(opcode) * 2
+                true
             }
             return result
+        }
+
+        /** Targets of every standard invoke or invoke-range instruction in this body. */
+        fun invokedMethodRefs(): List<MethodInvokeRef> {
+            val result = ArrayList<MethodInvokeRef>()
+            walkInstructions { cursor, end, opcode ->
+                if (((opcode in OP_INVOKE_VIRTUAL..OP_INVOKE_INTERFACE) ||
+                        (opcode in OP_INVOKE_VIRTUAL_RANGE..OP_INVOKE_INTERFACE_RANGE)) &&
+                    cursor + 6 <= end
+                ) {
+                    methodInvokeRef(data.ushortAt(cursor + 2))?.let(result::add)
+                }
+                true
+            }
+            return result
+        }
+
+        private inline fun walkInstructions(visitor: (cursor: Int, end: Int, opcode: Int) -> Boolean) {
+            if (codeOffset <= 0 || codeOffset + CODE_ITEM_HEADER_SIZE > data.size) return
+            val units = data.uintAt(codeOffset + CODE_ITEM_INSNS_SIZE)
+            if (units <= 0) return
+            val start = codeOffset + CODE_ITEM_HEADER_SIZE
+            val end = start + units * 2
+            if (end > data.size) return
+
+            var cursor = start
+            while (cursor + 2 <= end) {
+                val opcode = data[cursor].toInt() and 0xff
+                if (!visitor(cursor, end, opcode)) return
+                val step = nextInstructionUnits(cursor, end)
+                if (step <= 0) break
+                cursor += step * 2
+            }
+        }
+
+        private fun nextInstructionUnits(cursor: Int, end: Int): Int {
+            val unit0 = data.ushortAt(cursor)
+            if (unit0 < 0) return -1
+            val opcode = unit0 and 0xff
+            if (opcode == 0 && unit0 != 0) {
+                return when (unit0) {
+                    PAYLOAD_PACKED_SWITCH -> {
+                        if (cursor + 4 > end) return -1
+                        data.ushortAt(cursor + 2) * 2 + 4
+                    }
+
+                    PAYLOAD_SPARSE_SWITCH -> {
+                        if (cursor + 4 > end) return -1
+                        data.ushortAt(cursor + 2) * 4 + 2
+                    }
+
+                    PAYLOAD_FILL_ARRAY_DATA -> {
+                        if (cursor + 8 > end) return -1
+                        val width = data.ushortAt(cursor + 2)
+                        val size = data.uintAt(cursor + 4)
+                        if (width <= 0 || size < 0) return -1
+                        val units = (size.toLong() * width.toLong() + 1L) / 2L + 4L
+                        if (units > Int.MAX_VALUE) -1 else units.toInt()
+                    }
+
+                    else -> 1
+                }
+            }
+            return instructionUnits(opcode)
         }
     }
 
@@ -360,6 +571,7 @@ internal class DexFile private constructor(private val data: ByteArray) {
         private const val PROTO_ID_RETURN_TYPE = 4
         private const val PROTO_ID_PARAMETERS = 8
         private const val CLASS_DEF_SUPERCLASS = 8
+        private const val CLASS_DEF_INTERFACES = 12
         private const val NO_INDEX = -1
         private const val ACC_STATIC = 0x8
         private const val FIELD_ID_SIZE = 8
@@ -379,6 +591,15 @@ internal class DexFile private constructor(private val data: ByteArray) {
         /** `iget` … `sput-short` are the format 22c field-access opcodes. */
         private const val OP_IGET = 0x52
         private const val OP_SPUT_SHORT = 0x6d
+
+        private const val OP_INVOKE_VIRTUAL = 0x6e
+        private const val OP_INVOKE_INTERFACE = 0x72
+        private const val OP_INVOKE_VIRTUAL_RANGE = 0x74
+        private const val OP_INVOKE_INTERFACE_RANGE = 0x78
+
+        private const val PAYLOAD_PACKED_SWITCH = 0x0100
+        private const val PAYLOAD_SPARSE_SWITCH = 0x0200
+        private const val PAYLOAD_FILL_ARRAY_DATA = 0x0300
 
         /**
          * Instruction width in 16-bit code units, indexed by opcode. Walking instructions properly

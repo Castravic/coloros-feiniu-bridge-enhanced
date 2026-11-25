@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.4.4
+
+- 消除相册冷启动主线程 DEX / DexKit 阻塞：`onPackageReady` 不再在主线程扫描 APK，跳过相册子进程，并将首次定位整合为单后台线程 `FeiniuBridgeResolver` 的单轮 DEX 扫描。
+- 新增按相册 APK 指纹持久化的启动解析缓存（Schema v2 单行 XML 安全格式 + 后台同步 `commit()` 落盘），缓存 token 解密类名、`GwToken` 前缀、冷启动同步目标以及正/负向扫描标记；真机二次冷启直接命中缓存，零后台 DEX / DexKit 扫描。
+- 升级本地冷启动同步恢复：新增跨版本动态 DEX 定位器（`ColdStartSyncLocator`）并接入缓存，不再局限于固定版本白名单；同时补充相册 `17.10.41` 快速路径（`com.oplus.aiunit.vision.feq$b`）。
+- 适配相册 `17.10.41`：加入控制标志检查类 `com.oplus.aiunit.vision.bzr`（及增强/token 定位契约校验 `fva0` / `ae90` / `w1s`）；修复 `NasBackupConditionObserver` 构造函数被 R8 内联导致移动数据备份能力失效的问题（自动回退挂载 `a(Z)` / `b()`）。
+- 补充 `17.10.41` 可选真包契约校验、动态定位及启动缓存单元测试；`versionName` 提升至 `0.4.4`，`versionCode` 提升至 `19`，沿用历史签名证书支持覆盖升级。
+
 ## v0.4.3
 
 - 修复相册关闭期间新增截图或图片后，首次打开本地相册不显示、需要切后台再返回才刷新的问题。针对相册 16.50.8 / 17.10.7，在本地同步监听器错过首次前台事件时，仅补调一次原生启动回调；已有正常回调时跳过。用户已确认试修复恢复正常，正式 Release 同样启用。

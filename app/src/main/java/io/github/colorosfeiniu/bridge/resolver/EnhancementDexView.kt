@@ -18,6 +18,11 @@ internal object EnhancementDexView {
 
     fun from(dex: ByteArray): List<ClassView> {
         val reader = DexFile.parse(dex) ?: return emptyList()
+        return from(reader)
+    }
+
+    /** Overload reusing an already parsed [DexFile] in single-pass APK scans. */
+    fun from(reader: DexFile): List<ClassView> {
         val anchorIndices = ANCHOR_VALUES
             .map { value -> reader.indexOfString(value) }
             .filter { index -> index >= 0 }
