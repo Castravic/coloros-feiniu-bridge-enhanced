@@ -3,8 +3,11 @@ package io.github.colorosfeiniu.bridge
 import android.app.Application
 import android.content.Context
 import android.content.pm.ApplicationInfo
+import android.os.Build
 import android.util.Log
+import io.github.colorosfeiniu.bridge.resolver.ClassView
 import io.github.colorosfeiniu.bridge.resolver.ConnectionResolutionBootstrap
+import io.github.colorosfeiniu.bridge.resolver.ConnectionResolutionCache
 import io.github.colorosfeiniu.bridge.resolver.EnhancementDexView
 import io.github.colorosfeiniu.bridge.resolver.EnhancementLocator
 import io.github.colorosfeiniu.bridge.resolver.EnhancementResolutionCache
@@ -12,10 +15,14 @@ import io.github.colorosfeiniu.bridge.resolver.EnhancementTargets
 import io.github.colorosfeiniu.bridge.resolver.GalleryFingerprint
 import io.github.colorosfeiniu.bridge.resolver.LocatedMethod
 import io.github.colorosfeiniu.bridge.resolver.ResolutionSource
+import io.github.colorosfeiniu.bridge.resolver.StartupCacheSnapshot
+import io.github.colorosfeiniu.bridge.resolver.StartupResolutionCache
+import io.github.colorosfeiniu.bridge.resolver.ValidatedGalleryHooks
 import io.github.colorosfeiniu.bridge.resolver.ValidatedTokenHooks
 import io.github.libxposed.api.XposedInterface.Chain
 import io.github.libxposed.api.XposedInterface.Hooker
 import io.github.libxposed.api.XposedModule
+import io.github.libxposed.api.XposedModuleInterface.ModuleLoadedParam
 import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam
 import java.io.File
 import java.lang.ref.WeakReference
@@ -35,6 +42,17 @@ import java.util.zip.ZipFile
  */
 class FeiniuBridgeHook : XposedModule() {
 
+    @Volatile
+    private var loadedProcessName: String? = null
+    private val tokenFallbackInstalled = AtomicBoolean(false)
+    private val galleryStatInstalled = AtomicBoolean(false)
+    private val enhancementsHooksInstalled = AtomicBoolean(false)
+    private val mobileDataPreferenceInstalled = AtomicBoolean(false)
+
+    override fun onModuleLoaded(param: ModuleLoadedParam) {
+        loadedProcessName = param.processName
+    }
+
     override fun onPackageReady(param: PackageReadyParam) {
         installLogSink { priority, tag, message, throwable ->
             if (throwable != null) {
@@ -48,27 +66,41 @@ class FeiniuBridgeHook : XposedModule() {
         val packageName = param.packageName
         val profile = TokenDecryptorTargets.forPackage(packageName) ?: return
         if (packageName == GALLERY_PACKAGE) {
+            val process = loadedProcessName
+            if (process != null && process != GALLERY_PACKAGE) {
+                logInfo("skipping gallery sub-process process=$process")
+                return
+            }
             StartupRefreshDiagnostics.start { message -> logInfo(message) }
             LocalMediaObserverDiagnostics.install(this, param.classLoader)
         }
         val classLoader = param.classLoader
         val appInfo = param.applicationInfo
 
-        val tokenTarget = runCatching {
-            TargetResolver.resolve(classLoader, appInfo, profile) { message -> logInfo(message) }
-        }.getOrElse { error ->
-            logError(
-                "token target resolution failed: ${error.javaClass.simpleName}: ${error.message}",
-                error,
-            )
-            Target(emptyList(), null, "none")
-        }.takeIf { it.methods.isNotEmpty() }
+        if (packageName != GALLERY_PACKAGE) {
+            val tokenTarget = runCatching {
+                TargetResolver.resolve(classLoader, appInfo, profile) { message -> logInfo(message) }
+            }.getOrElse { error ->
+                logError(
+                    "token target resolution failed: ${error.javaClass.simpleName}: ${error.message}",
+                    error,
+                )
+                Target(emptyList(), null, "none")
+            }.takeIf { it.methods.isNotEmpty() }
 
-        installTokenFallback(appInfo, tokenTarget, packageName)
-
-        if (packageName == GALLERY_PACKAGE) {
-            installGalleryFeatures(param, needTokenFallback = tokenTarget == null)
+            installTokenFallback(appInfo, tokenTarget, packageName)
+            return
         }
+
+        // Gallery cold start: never scan APK DEX files on the main thread during BIND_APPLICATION.
+        val knownToken = runCatching {
+            TargetResolver.resolveKnownConfirmed(classLoader, profile)
+        }.getOrNull()
+        if (knownToken != null) {
+            installTokenFallback(appInfo, knownToken, packageName)
+        }
+
+        installGalleryFeatures(param)
     }
 
     private fun installTokenFallback(
@@ -80,6 +112,7 @@ class FeiniuBridgeHook : XposedModule() {
             logWarn("prefix fallback unavailable for $packageName")
             return
         }
+        if (!tokenFallbackInstalled.compareAndSet(false, true)) return
         runCatching {
             target.methods.forEach { method ->
                 method.isAccessible = true
@@ -89,53 +122,53 @@ class FeiniuBridgeHook : XposedModule() {
             logInfo("installed for $packageName class=${target.className} via=${target.source}")
             installTokenDiagnostics(target.decryptMethods)
         }.onFailure { error ->
+            tokenFallbackInstalled.set(false)
             logError("install failed: ${error.javaClass.simpleName}: ${error.message}", error)
         }
     }
 
-    private fun installGalleryFeatures(param: PackageReadyParam, needTokenFallback: Boolean) {
+    private fun installGalleryFeatures(param: PackageReadyParam) {
         val classLoader = param.classLoader
         val appInfo = param.applicationInfo
 
         runCatching {
-            ConnectionResolutionBootstrap.install(
-                module = this,
+            ConnectionResolutionBootstrap.tryInstallKnown(
                 classLoader = classLoader,
-                needToken = needTokenFallback,
+                needToken = false,
                 needGallery = true,
                 logger = { message -> logInfo(message) },
                 tokenInstaller = { hooks, source ->
                     installEnhancedTokenHooks(appInfo, hooks, source)
                 },
                 galleryInstaller = { hooks, _ ->
-                    GalleryStatFallback.install(this, hooks) { message -> logInfo(message) }
+                    installGalleryStatFallbackOnce(hooks)
                 },
             )
         }.onFailure { error ->
             logError(
-                "gallery resolver install failed: ${error.javaClass.simpleName}: ${error.message}",
+                "gallery known resolver failed: ${error.javaClass.simpleName}: ${error.message}",
                 error,
             )
         }
 
         installPrivateLanTlsCompatibility(classLoader)
 
-        installGalleryEnhancements(appInfo, classLoader)
+        installGalleryOnAttach(appInfo, classLoader)
+    }
+
+    private fun installGalleryStatFallbackOnce(hooks: ValidatedGalleryHooks) {
+        if (!galleryStatInstalled.compareAndSet(false, true)) return
+        GalleryStatFallback.install(this, hooks) { message -> logInfo(message) }
     }
 
     /**
-     * Installs the Gallery enhancement hooks as soon as a `Context` is available.
-     *
-     * The resolver reads and writes the per-fingerprint cache, and inside `onPackageReady`
-     * `ActivityThread.currentApplication()` is still null (the Application has not been created
-     * yet) — the exact reason the enhancement cache was never written. Mirroring
-     * [ConnectionResolutionBootstrap], the resolve + install pass runs on `Application.attach`,
-     * taking the context from the hook argument. That is still far before any backup/temperature
-     * code runs, so no existing hook timing is lost.
+     * Installs Gallery cache-backed hooks on `Application.attach` (when `Context` first becomes
+     * available) and dispatches any remaining DEX / DexKit scans to a single background thread so
+     * cold-start `BIND_APPLICATION` and `EnableAutoSync` are never blocked on the main thread.
      */
-    private fun installGalleryEnhancements(appInfo: ApplicationInfo, classLoader: ClassLoader) {
+    private fun installGalleryOnAttach(appInfo: ApplicationInfo, classLoader: ClassLoader) {
         currentApplication()?.let { context ->
-            runGalleryEnhancements(context, appInfo, classLoader)
+            onGalleryContextReady(context, appInfo, classLoader)
             return
         }
 
@@ -147,10 +180,10 @@ class FeiniuBridgeHook : XposedModule() {
                 val result = chain.proceed()
                 if (started.compareAndSet(false, true)) {
                     runCatching {
-                        runGalleryEnhancements(chain.getArg(0) as? Context, appInfo, classLoader)
+                        onGalleryContextReady(chain.getArg(0) as? Context, appInfo, classLoader)
                     }.onFailure { error ->
                         logError(
-                            "gallery enhancement install failed: " +
+                            "gallery attach initialization failed: " +
                                 "${error.javaClass.simpleName}: ${error.message}",
                             error,
                         )
@@ -158,58 +191,51 @@ class FeiniuBridgeHook : XposedModule() {
                 }
                 result
             }
-            logInfo("gallery enhancement resolution deferred to Application.attach")
+            logInfo("gallery resolution deferred to Application.attach")
         }.onFailure { error ->
             logWarn(
-                "gallery enhancement deferral unavailable: " +
+                "gallery attach deferral unavailable: " +
                     "${error.javaClass.simpleName}: ${error.message}",
             )
-            runGalleryEnhancements(currentApplication(), appInfo, classLoader)
+            onGalleryContextReady(currentApplication(), appInfo, classLoader)
         }
     }
 
-    private fun runGalleryEnhancements(
+    private fun onGalleryContextReady(
         context: Context?,
         appInfo: ApplicationInfo,
         classLoader: ClassLoader,
     ) {
-        if (context != null) {
-            LocalMediaStartupRecovery.install(this, context, classLoader) { message -> logInfo(message) }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val process = runCatching { Application.getProcessName() }.getOrNull()
+            if (process != null && process != GALLERY_PACKAGE) {
+                logInfo("skipping gallery sub-process on attach process=$process")
+                return
+            }
         }
-        val enhancements = StartupRefreshDiagnostics.measure("enhancement-resolution") {
-            resolveGalleryEnhancements(context, appInfo, classLoader)
-        }
-        installBackupPauseDiagnostics(classLoader, enhancements)
-        val conditionScopeHooks = installBackupTemperatureCompatibility(classLoader, enhancements)
-        installBackupPauseReasonText(classLoader, enhancements)
-        installMobileDataBackup(classLoader, conditionScopeHooks)
-        installMobileDataPreference(classLoader)
-    }
 
-    /**
-     * Resolves the Gallery enhancement targets through the fingerprint cache, then a DEX scan.
-     *
-     * Every located target is re-validated against the live class loader before it is used or
-     * cached, so a stale entry or a partially matching build degrades to a no-op.
-     */
-    private fun resolveGalleryEnhancements(
-        context: Context?,
-        appInfo: ApplicationInfo,
-        classLoader: ClassLoader,
-    ): EnhancementTargets {
-        // The connection resolver stores under the device-protected context, which is readable
-        // before the user unlocks; keep the enhancement cache in the same place so both caches share
-        // one file and one lifetime.
+        // Store all fingerprint caches under the device-protected context so they share one
+        // lifecycle and remain readable before user unlock.
         val cacheContext = context?.createDeviceProtectedStorageContext()
         val fingerprint = context?.let { value ->
             runCatching { GalleryFingerprint.from(value) }.getOrNull()
         }
-        val cache = if (cacheContext != null && fingerprint != null) {
+        val startupCache = if (cacheContext != null && fingerprint != null) {
+            StartupResolutionCache(cacheContext, fingerprint)
+        } else {
+            null
+        }
+        val enhancementCache = if (cacheContext != null && fingerprint != null) {
             EnhancementResolutionCache(cacheContext, fingerprint)
         } else {
             null
         }
-        if (cache == null) {
+        val connectionCache = if (cacheContext != null && fingerprint != null) {
+            ConnectionResolutionCache(cacheContext, fingerprint)
+        } else {
+            null
+        }
+        if (startupCache == null) {
             val reason = when {
                 context == null -> "no-context"
                 fingerprint == null -> "no-fingerprint"
@@ -218,53 +244,352 @@ class FeiniuBridgeHook : XposedModule() {
             logInfo("enhancement resolver cache=unavailable reason=$reason")
         }
 
-        val cached = cache?.read { true }
-        if (cached != null) {
-            val validated = validateEnhancementTargets(cached, classLoader)
-            if (validated != null) {
-                logInfo("enhancement resolver source=cache")
-                return validated
+        val startupOutcome = startupCache?.readWithStatus()
+        var snapshot = startupOutcome?.snapshot ?: StartupCacheSnapshot()
+        var snapshotDirty = false
+        if (startupOutcome != null) {
+            val cached = startupOutcome.snapshot
+            if (cached != null) {
+                logInfo(
+                    "startup cache=hit token=${cached.tokenClassName != null} " +
+                        "prefix=${cached.prefixValue != null} " +
+                        "coldStart=${cached.coldStartSync != null} " +
+                        "galleryScanned=${cached.galleryStatScanned}",
+                )
+            } else {
+                logInfo("startup cache=${startupOutcome.status}")
             }
-            logInfo("enhancement resolver cache=stale (live class loader disagrees); rescanning")
-        } else if (cache != null) {
-            logInfo("enhancement resolver cache=miss")
         }
 
-        val views = mutableListOf<io.github.colorosfeiniu.bridge.resolver.ClassView>()
-        ApkDex.forEachDex(
-            appInfo = appInfo,
-            logger = { message -> logInfo(message) },
-            action = { bytes -> views += EnhancementDexView.from(bytes) },
-        )
-        val located = EnhancementLocator.locate(views)
-        located.diagnostics.forEach { message -> logInfo("enhancement locator: $message") }
-        // Keep only the groups the live class loader confirms; never cache an unvalidated guess.
-        val validated = validateEnhancementTargets(located, classLoader) ?: EnhancementTargets(
-            temperatureProvider = null,
-            pauseConditionCheckers = emptyList(),
-            pauseStateInfoClass = null,
-            pauseReasonText = null,
-            diagnostics = located.diagnostics,
-        )
-        if (!validated.isEmpty) {
-            if (cache != null) {
-                cache.write(validated)
+        val cachedPrefix = snapshot.prefixValue
+        val cachedPrefixSource = snapshot.prefixSource
+        if (cachedPrefix != null && cachedPrefixSource != null) {
+            PrefixResolver.seed(ResolvedPrefix(cachedPrefix, cachedPrefixSource))
+        }
+
+        snapshot.coldStartSync?.let { cachedColdStart ->
+            val ok = LocalMediaStartupRecovery.install(
+                module = this,
+                mapping = cachedColdStart,
+                classLoader = classLoader,
+                source = "cache",
+            ) { message -> logInfo(message) }
+            if (!ok) {
+                snapshot = snapshot.copy(coldStartSync = null, coldStartSyncScanned = false)
+                snapshotDirty = true
+            }
+        }
+        if (!LocalMediaStartupRecovery.isInstalled() && context != null) {
+            LocalMediaStartupRecovery.install(this, context, classLoader) { message -> logInfo(message) }
+        }
+        if (!LocalMediaStartupRecovery.isInstalled() && snapshot.coldStartSyncScanned) {
+            logInfo("local startup sync recovery source=negative-cache")
+        }
+        val needColdStartScan = !LocalMediaStartupRecovery.isInstalled() && !snapshot.coldStartSyncScanned
+
+        if (!tokenFallbackInstalled.get()) {
+            snapshot.tokenClassName?.let { cachedClass ->
+                val cachedToken = TargetResolver.resolveFromClassName(
+                    classLoader = classLoader,
+                    profile = TokenDecryptorTargets.GALLERY,
+                    className = cachedClass,
+                    source = "cache",
+                )
+                if (cachedToken != null) {
+                    installTokenFallback(appInfo, cachedToken, GALLERY_PACKAGE)
+                } else {
+                    logInfo("token resolver cache=stale class=$cachedClass")
+                    snapshot = snapshot.copy(tokenClassName = null, tokenScanned = false)
+                    snapshotDirty = true
+                }
+            }
+        }
+        if (!tokenFallbackInstalled.get() && connectionCache != null) {
+            val cachedTokenStatus = ConnectionResolutionBootstrap.tryInstallCached(
+                cache = connectionCache,
+                classLoader = classLoader,
+                needToken = true,
+                needGallery = false,
+                logger = { message -> logInfo(message) },
+                tokenInstaller = { hooks, source ->
+                    installEnhancedTokenHooks(appInfo, hooks, source)
+                },
+                galleryInstaller = { hooks, _ ->
+                    installGalleryStatFallbackOnce(hooks)
+                },
+            )
+            if (cachedTokenStatus.tokenCacheStale) {
+                snapshot = snapshot.copy(tokenScanned = false)
+                snapshotDirty = true
+            }
+        }
+        if (!tokenFallbackInstalled.get() && snapshot.tokenScanned) {
+            logInfo("token resolver source=negative-cache")
+        }
+        val needTokenScan = !tokenFallbackInstalled.get() && !snapshot.tokenScanned
+
+        val rawCachedEnhancements = enhancementCache?.read { true }
+        val cachedEnhancements = rawCachedEnhancements?.let { validateEnhancementTargets(it, classLoader) }
+        if (rawCachedEnhancements != null && cachedEnhancements == null) {
+            logInfo("enhancement resolver cache=stale (live class loader disagrees); rescanning")
+            snapshot = snapshot.copy(enhancementsScanned = false)
+            snapshotDirty = true
+        }
+        if (cachedEnhancements != null) {
+            logInfo("enhancement resolver source=cache")
+            installEnhancementHooks(classLoader, cachedEnhancements)
+        } else if (snapshot.enhancementsScanned) {
+            logInfo("enhancement resolver source=negative-cache")
+            installEnhancementHooks(classLoader, emptyEnhancementTargets())
+        }
+        val needEnhancementsScan = cachedEnhancements == null && !snapshot.enhancementsScanned
+
+        if (!galleryStatInstalled.get() && connectionCache != null) {
+            val cachedGalleryStatus = ConnectionResolutionBootstrap.tryInstallCached(
+                cache = connectionCache,
+                classLoader = classLoader,
+                needToken = false,
+                needGallery = true,
+                logger = { message -> logInfo(message) },
+                tokenInstaller = { hooks, source ->
+                    installEnhancedTokenHooks(appInfo, hooks, source)
+                },
+                galleryInstaller = { hooks, _ ->
+                    installGalleryStatFallbackOnce(hooks)
+                },
+            )
+            if (cachedGalleryStatus.galleryCacheStale) {
+                snapshot = snapshot.copy(galleryStatScanned = false)
+                snapshotDirty = true
+            }
+        }
+        if (!galleryStatInstalled.get() && snapshot.galleryStatScanned) {
+            logInfo("gallery resolver source=negative-cache")
+        }
+        val needGallerySemanticScan = !galleryStatInstalled.get() && !snapshot.galleryStatScanned
+        val needPrefixScan = snapshot.prefixValue == null
+
+        if (snapshotDirty) {
+            startupCache?.update { snapshot }
+        }
+
+        if (
+            !needTokenScan &&
+            !needPrefixScan &&
+            !needEnhancementsScan &&
+            !needColdStartScan &&
+            !needGallerySemanticScan
+        ) {
+            return
+        }
+
+        Thread({
+            runCatching {
+                runBackgroundResolution(
+                    appInfo = appInfo,
+                    classLoader = classLoader,
+                    startupCache = startupCache,
+                    enhancementCache = enhancementCache,
+                    connectionCache = connectionCache,
+                    needTokenScan = needTokenScan,
+                    needPrefixScan = needPrefixScan,
+                    needEnhancementsScan = needEnhancementsScan,
+                    needColdStartScan = needColdStartScan,
+                    needGallerySemanticScan = needGallerySemanticScan,
+                )
+            }.onFailure { error ->
+                logError(
+                    "gallery background resolution failed: " +
+                        "${error.javaClass.simpleName}: ${error.message}",
+                    error,
+                )
+            }
+        }, "FeiniuBridgeResolver").apply { isDaemon = true }.start()
+    }
+
+    private fun runBackgroundResolution(
+        appInfo: ApplicationInfo,
+        classLoader: ClassLoader,
+        startupCache: StartupResolutionCache?,
+        enhancementCache: EnhancementResolutionCache?,
+        connectionCache: ConnectionResolutionCache?,
+        needTokenScan: Boolean,
+        needPrefixScan: Boolean,
+        needEnhancementsScan: Boolean,
+        needColdStartScan: Boolean,
+        needGallerySemanticScan: Boolean,
+    ) {
+        val needApkDexPass = needTokenScan || needPrefixScan || needEnhancementsScan || needColdStartScan
+        var locatedTokenClass: String? = null
+        var locatedPrefix: String? = null
+        val views = if (needEnhancementsScan) mutableListOf<ClassView>() else null
+        val coldStartScanState = if (needColdStartScan) ColdStartSyncLocator.ScanState() else null
+
+        if (needApkDexPass) {
+            StartupRefreshDiagnostics.measure("background-dex-scan") {
+                ApkDex.forEachDex(
+                    appInfo = appInfo,
+                    logger = { message -> logInfo(message) },
+                    action = { bytes ->
+                        val dex = DexFile.parse(bytes) ?: return@forEachDex
+                        if (needTokenScan && locatedTokenClass == null) {
+                            locatedTokenClass = TokenDecryptorLocator.locate(
+                                dex,
+                                TokenDecryptorTargets.GALLERY,
+                            )
+                        }
+                        if (needPrefixScan && locatedPrefix == null) {
+                            locatedPrefix = dex.firstStringContaining("GwToken") {
+                                PrefixResolver.isFeiniuPrefix(it)
+                            }
+                        }
+                        if (views != null) {
+                            views += EnhancementDexView.from(dex)
+                        }
+                        coldStartScanState?.accept(dex)
+                    },
+                )
+            }
+        }
+
+        var resolvedPrefix: ResolvedPrefix? = null
+        if (needPrefixScan) {
+            val prefix = locatedPrefix?.let { ResolvedPrefix(it, "apk-dex") }
+                ?: ResolvedPrefix(KNOWN_PREFIX, "builtin")
+            PrefixResolver.seed(prefix)
+            resolvedPrefix = prefix
+        }
+
+        var resolvedTokenClass: String? = null
+        if (needTokenScan && !tokenFallbackInstalled.get()) {
+            val dexTarget = locatedTokenClass?.let { className ->
+                TargetResolver.resolveFromClassName(
+                    classLoader = classLoader,
+                    profile = TokenDecryptorTargets.GALLERY,
+                    className = className,
+                    source = "dex-scan",
+                )
+            } ?: TargetResolver.resolveKnownUnconfirmed(classLoader, TokenDecryptorTargets.GALLERY)
+            if (dexTarget != null) {
+                installTokenFallback(appInfo, dexTarget, GALLERY_PACKAGE)
+                resolvedTokenClass = dexTarget.className
+            }
+        }
+
+        var resolvedColdStart: ColdStartSyncTargets? = null
+        if (needColdStartScan) {
+            val locatedColdStart = coldStartScanState?.resolve()
+            val installed = if (locatedColdStart != null) {
+                LocalMediaStartupRecovery.install(
+                    module = this,
+                    mapping = locatedColdStart,
+                    classLoader = classLoader,
+                    source = "dex-scan",
+                ) { message -> logInfo(message) }
+            } else {
+                logInfo("local startup sync recovery unavailable source=dex-scan")
+                false
+            }
+            if (installed) {
+                resolvedColdStart = locatedColdStart
+            }
+        }
+
+        if (needEnhancementsScan) {
+            val located = EnhancementLocator.locate(views.orEmpty())
+            located.diagnostics.forEach { message -> logInfo("enhancement locator: $message") }
+            val validated = validateEnhancementTargets(located, classLoader)
+                ?: emptyEnhancementTargets(located.diagnostics)
+            if (!validated.isEmpty) {
+                enhancementCache?.write(validated)
                 logInfo("enhancement resolver cache=write")
             } else {
-                logInfo("enhancement resolver cache=write skipped reason=no-cache")
+                logInfo("enhancement resolver cache=write skipped reason=empty-result")
             }
-        } else {
-            logInfo("enhancement resolver cache=write skipped reason=empty-result")
+            logInfo(
+                "enhancement resolver source=dex-scan " +
+                    "temperature=${validated.temperatureProvider?.className ?: "none"} " +
+                    "checkers=${validated.pauseConditionCheckers.size} " +
+                    "stateInfo=${validated.pauseStateInfoClass ?: "none"} " +
+                    "text=${validated.pauseReasonText?.className ?: "none"}",
+            )
+            installEnhancementHooks(classLoader, validated)
         }
-        logInfo(
-            "enhancement resolver source=dex-scan " +
-                "temperature=${validated.temperatureProvider?.className ?: "none"} " +
-                "checkers=${validated.pauseConditionCheckers.size} " +
-                "stateInfo=${validated.pauseStateInfoClass ?: "none"} " +
-                "text=${validated.pauseReasonText?.className ?: "none"}",
-        )
-        return validated
+
+        val needSemanticToken = needTokenScan && !tokenFallbackInstalled.get()
+        if (needApkDexPass) {
+            startupCache?.update(commit = true) { current ->
+                current.copy(
+                    prefixValue = resolvedPrefix?.value ?: current.prefixValue,
+                    prefixSource = resolvedPrefix?.source ?: current.prefixSource,
+                    tokenScanned = current.tokenScanned || (needTokenScan && !needSemanticToken),
+                    tokenClassName = resolvedTokenClass ?: current.tokenClassName,
+                    coldStartSyncScanned = current.coldStartSyncScanned || needColdStartScan,
+                    coldStartSync = if (needColdStartScan) resolvedColdStart else current.coldStartSync,
+                    enhancementsScanned = current.enhancementsScanned || needEnhancementsScan,
+                )
+            }?.let { write ->
+                val s = write.snapshot
+                logInfo(
+                    "startup cache=write ok=${write.persisted} token=${s.tokenClassName != null} " +
+                        "prefix=${s.prefixValue != null} coldStart=${s.coldStartSync != null} " +
+                        "galleryScanned=${s.galleryStatScanned}",
+                )
+            }
+        }
+
+        if (needSemanticToken || needGallerySemanticScan) {
+            ConnectionResolutionBootstrap.resolveSemanticallyAndInstall(
+                cache = connectionCache,
+                classLoader = classLoader,
+                needToken = needSemanticToken,
+                needGallery = needGallerySemanticScan,
+                logger = { message -> logInfo(message) },
+                tokenInstaller = { hooks, source ->
+                    installEnhancedTokenHooks(appInfo, hooks, source)
+                },
+                galleryInstaller = { hooks, _ ->
+                    installGalleryStatFallbackOnce(hooks)
+                },
+            )
+            if (needSemanticToken && !tokenFallbackInstalled.get()) {
+                logWarn("prefix fallback unavailable for $GALLERY_PACKAGE")
+            }
+            startupCache?.update(commit = true) { current ->
+                current.copy(
+                    tokenScanned = current.tokenScanned || needTokenScan,
+                    galleryStatScanned = current.galleryStatScanned || needGallerySemanticScan,
+                )
+            }?.let { write ->
+                val s = write.snapshot
+                logInfo(
+                    "startup cache=write ok=${write.persisted} token=${s.tokenClassName != null} " +
+                        "prefix=${s.prefixValue != null} coldStart=${s.coldStartSync != null} " +
+                        "galleryScanned=${s.galleryStatScanned}",
+                )
+            }
+        }
     }
+
+    private fun installEnhancementHooks(
+        classLoader: ClassLoader,
+        enhancements: EnhancementTargets,
+    ) {
+        if (!enhancementsHooksInstalled.compareAndSet(false, true)) return
+        installBackupPauseDiagnostics(classLoader, enhancements)
+        val conditionScopeHooks = installBackupTemperatureCompatibility(classLoader, enhancements)
+        installBackupPauseReasonText(classLoader, enhancements)
+        installMobileDataBackup(classLoader, conditionScopeHooks)
+        installMobileDataPreference(classLoader)
+    }
+
+    private fun emptyEnhancementTargets(diagnostics: List<String> = emptyList()) = EnhancementTargets(
+        temperatureProvider = null,
+        pauseConditionCheckers = emptyList(),
+        pauseStateInfoClass = null,
+        pauseReasonText = null,
+        diagnostics = diagnostics,
+    )
 
     /**
      * Drops any located target the running Gallery build cannot actually provide.
@@ -343,6 +668,7 @@ class FeiniuBridgeHook : XposedModule() {
         hooks: ValidatedTokenHooks,
         source: ResolutionSource,
     ) {
+        if (!tokenFallbackInstalled.compareAndSet(false, true)) return
         hooks.prefix.isAccessible = true
         val session = PrefixFallbackSession()
         hook(hooks.prefix).intercept { chain -> interceptPrefixCall(chain, appInfo, session) }
@@ -553,10 +879,18 @@ class FeiniuBridgeHook : XposedModule() {
                             arrayOf(Boolean::class.javaPrimitiveType),
                         )
                 }?.apply { isAccessible = true } ?: return@mapNotNull null
-                val constructors = BridgeReflect.allConstructors(candidate.type)
-                if (constructors.isEmpty()) return@mapNotNull null
-                constructors.forEach { constructor ->
-                    hook(constructor).intercept(RememberConditionObserverHook(refreshMethod))
+                val anchorMethods = BridgeReflect.allConstructors(candidate.type).ifEmpty {
+                    // R8 inlines single-call-site constructors on newer Gallery builds (e.g. 17.10.41);
+                    // attach to registration / dispatch methods instead so the observer instance is still captured.
+                    candidate.type.declaredMethods.filter { method ->
+                        !Modifier.isStatic(method.modifiers) &&
+                            method.returnType == Void.TYPE &&
+                            (method == refreshMethod || (method.name == "b" && method.parameterTypes.isEmpty()))
+                    }.onEach { it.isAccessible = true }
+                }
+                if (anchorMethods.isEmpty()) return@mapNotNull null
+                anchorMethods.forEach { anchor ->
+                    hook(anchor).intercept(RememberConditionObserverHook(refreshMethod))
                 }
                 candidate
             }
@@ -669,12 +1003,14 @@ class FeiniuBridgeHook : XposedModule() {
 
 
     private fun installMobileDataPreference(classLoader: ClassLoader) {
+        if (mobileDataPreferenceInstalled.get()) return
         runCatching {
             val settingsFragment = Class.forName(SETTINGS_FRAGMENT_CLASS, false, classLoader)
-            BridgeReflect.allMethodsNamed(settingsFragment, SETTINGS_CREATE_PREFERENCES_METHOD)
-                .forEach { method ->
-                    hook(method).intercept(AddMobileDataPreferenceHook(classLoader))
-                }
+            val methods = BridgeReflect.allMethodsNamed(settingsFragment, SETTINGS_CREATE_PREFERENCES_METHOD)
+            if (methods.isEmpty() || !mobileDataPreferenceInstalled.compareAndSet(false, true)) return
+            methods.forEach { method ->
+                hook(method).intercept(AddMobileDataPreferenceHook(classLoader))
+            }
             logInfo("mobile data backup preference hook installed")
         }.onFailure { error ->
             logInfo("mobile data backup preference hook failed: ${error.javaClass.simpleName}: ${error.message}")
@@ -837,8 +1173,8 @@ class FeiniuBridgeHook : XposedModule() {
         private var lastLoggedState: String? = null
 
         fun evaluate(actualTemperature: Float): TemperatureDecision {
-            // 16.50.8 naq / 17.10.7 m1s use refresh/background flags, not app foreground.
-            // Prefer the actual lifecycle state whenever that validated method is available.
+            // 16.50.8 naq / 17.10.7 m1s / 17.10.41 bzr use refresh/background flags, not app
+            // foreground. Prefer the actual lifecycle state whenever that validated method is available.
             val foreground = runCatching {
                 val method = activityLifecycleMethod
                 method?.let { candidate ->
@@ -1170,13 +1506,60 @@ class FeiniuBridgeHook : XposedModule() {
                 locateByShape = { resolveClassByShape(classLoader, appInfo, profile, logger) },
             ) ?: return Target(emptyList(), null, "none")
 
-            return Target(
-                prefixMethodsOf(resolved.target, profile),
-                resolved.target.name,
-                resolved.source.logValue,
-                TokenDecryptorMethods.decryptMethodsOf(resolved.target, profile),
+            return toTarget(resolved.target, profile, resolved.source.logValue)
+        }
+
+        fun resolveKnownConfirmed(
+            classLoader: ClassLoader,
+            profile: TokenDecryptorProfile,
+        ): Target? {
+            val confirmed = profile.classNames
+                .mapNotNull { className -> findClass(className, classLoader) }
+                .firstOrNull { candidate ->
+                    prefixMethodsOf(candidate, profile).isNotEmpty() &&
+                        declaresDecryptEntryPoint(candidate, profile)
+                } ?: return null
+            return toTarget(confirmed, profile, TokenDecryptorTargetResolver.Source.KNOWN_NAME.logValue)
+        }
+
+        fun resolveKnownUnconfirmed(
+            classLoader: ClassLoader,
+            profile: TokenDecryptorProfile,
+        ): Target? {
+            val legacy = profile.classNames
+                .mapNotNull { className -> findClass(className, classLoader) }
+                .firstOrNull { candidate -> prefixMethodsOf(candidate, profile).isNotEmpty() }
+                ?: return null
+            return toTarget(
+                legacy,
+                profile,
+                TokenDecryptorTargetResolver.Source.KNOWN_NAME_UNCONFIRMED.logValue,
             )
         }
+
+        fun resolveFromClassName(
+            classLoader: ClassLoader,
+            profile: TokenDecryptorProfile,
+            className: String,
+            source: String,
+        ): Target? {
+            val clazz = findClass(className, classLoader) ?: return null
+            if (prefixMethodsOf(clazz, profile).isEmpty() || !declaresDecryptEntryPoint(clazz, profile)) {
+                return null
+            }
+            return toTarget(clazz, profile, source)
+        }
+
+        private fun toTarget(
+            clazz: Class<*>,
+            profile: TokenDecryptorProfile,
+            source: String,
+        ): Target = Target(
+            prefixMethodsOf(clazz, profile),
+            clazz.name,
+            source,
+            TokenDecryptorMethods.decryptMethodsOf(clazz, profile),
+        )
 
         private fun resolveClassByShape(
             classLoader: ClassLoader,
@@ -1243,11 +1626,17 @@ class FeiniuBridgeHook : XposedModule() {
         @Volatile
         private var cachedPrefix: ResolvedPrefix? = null
 
+        fun seed(prefix: ResolvedPrefix) {
+            if (cachedPrefix == null) {
+                cachedPrefix = prefix
+            }
+        }
+
         fun resolve(appInfo: ApplicationInfo, logger: (String) -> Unit): ResolvedPrefix? {
             cachedPrefix?.let { return it }
 
             val fromApk = ApkDex.scan(appInfo, logger) { bytes ->
-                DexFile.parse(bytes)?.firstString { it.isFeiniuPrefix() }
+                DexFile.parse(bytes)?.firstStringContaining("GwToken") { isFeiniuPrefix(it) }
             }
             val resolved = fromApk?.let { ResolvedPrefix(it, "apk-dex") }
                 ?: ResolvedPrefix(KNOWN_PREFIX, "builtin")
@@ -1256,8 +1645,8 @@ class FeiniuBridgeHook : XposedModule() {
             return resolved
         }
 
-        private fun String.isFeiniuPrefix(): Boolean =
-            length in 16..80 && PREFIX_REGEX.matches(this)
+        fun isFeiniuPrefix(value: String): Boolean =
+            value.length in 16..80 && PREFIX_REGEX.matches(value)
     }
 
     /** Walks the DEX images of the installed target APKs. */
@@ -1367,6 +1756,7 @@ class FeiniuBridgeHook : XposedModule() {
         private val CONTROL_FLAG_CHECKER_CLASSES = setOf(
             "com.oplus.aiunit.vision.naq", // Gallery 16.50.8
             "com.oplus.aiunit.vision.m1s", // Gallery 17.10.7
+            "com.oplus.aiunit.vision.bzr", // Gallery 17.10.41
         )
         private val NAS_BACKUP_STATE_INFO_CLASSES = arrayOf(
             "com.oplus.aiunit.vision.wdq", // Gallery 16.50.8

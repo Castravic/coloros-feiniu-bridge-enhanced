@@ -13,6 +13,9 @@ class ColdStartSyncDexValidationTest {
     @Test fun `real 17 10 7 local startup callbacks match the trial hooks`() =
         validate("17.10.7", "gallery17107.apk.path")
 
+    @Test fun `real 17 10 41 local startup callbacks match known and dynamic locators`() =
+        validate("17.10.41", "gallery171041.apk.path")
+
     @Test fun `unknown gallery versions do not use an obfuscated guess`() {
         assertNull(ColdStartSyncTargets.forVersion("17.10.8"))
         assertNull(ColdStartSyncTargets.forVersion(null))
@@ -24,20 +27,24 @@ class ColdStartSyncDexValidationTest {
         val targets = requireNotNull(ColdStartSyncTargets.forVersion(version))
         val names = setOf(targets.lifecycle, targets.registration, targets.listener)
         val shapes = mutableMapOf<String, List<DexFile.MethodShape>>()
+        val scanState = ColdStartSyncLocator.ScanState()
         ZipFile(File(requireNotNull(path))).use { zip ->
             zip.entries().asSequence().filter { it.name.matches(Regex("classes\\d*\\.dex")) }.forEach { entry ->
                 val bytes = zip.getInputStream(entry).use { it.readBytes() }
-                requireNotNull(DexFile.parse(bytes)).classes().filter { it.className in names }.forEach {
+                val dex = requireNotNull(DexFile.parse(bytes))
+                scanState.accept(dex)
+                dex.classes().filter { it.className in names }.forEach {
                     shapes[it.className] = it.methodShapes()
                 }
             }
         }
+        assertEquals(targets, scanState.resolve())
         assertEquals(names, shapes.keys)
         assertTrue(shapes.getValue(targets.lifecycle).any {
             it.name == targets.foreground && it.descriptor == "()Z" && it.isStatic
         })
         assertTrue(shapes.getValue(targets.listener).any {
-            it.name == "g" && it.descriptor == "()V" && !it.isStatic
+            it.name == targets.nativeStartMethod && it.descriptor == "()V" && !it.isStatic
         })
         val registration = shapes.getValue(targets.registration).single {
             it.name == "invokeSuspend" && it.descriptor == "(Ljava/lang/Object;)Ljava/lang/Object;"

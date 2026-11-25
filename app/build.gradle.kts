@@ -22,8 +22,8 @@ android {
         applicationId = "io.github.colorosfeiniu.bridge"
         minSdk = 26
         targetSdk = 35
-        versionCode = 18
-        versionName = "0.4.3"
+        versionCode = 19
+        versionName = "0.4.4"
         buildConfigField(
             "boolean",
             "REFRESH_DIAGNOSTICS",
@@ -77,7 +77,14 @@ dependencies {
 }
 
 tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
-    listOf("gallery.dex.path", "gallery.apk.path", "gallery16508.apk.path", "gallery17107.apk.path", "mydevices.dex.path").forEach { property ->
+    listOf(
+        "gallery.dex.path",
+        "gallery.apk.path",
+        "gallery16508.apk.path",
+        "gallery17107.apk.path",
+        "gallery171041.apk.path",
+        "mydevices.dex.path",
+    ).forEach { property ->
         System.getProperty(property)?.let { path -> systemProperty(property, path) }
     }
 }

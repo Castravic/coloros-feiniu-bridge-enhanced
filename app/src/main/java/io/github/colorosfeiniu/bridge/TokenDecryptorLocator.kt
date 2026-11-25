@@ -22,6 +22,14 @@ internal object TokenDecryptorLocator {
         profile: TokenDecryptorProfile = TokenDecryptorTargets.GALLERY,
     ): String? {
         val reader = DexFile.parse(dex) ?: return null
+        return locate(reader, profile)
+    }
+
+    /** Overload reusing an already parsed [DexFile] in single-pass APK scans. */
+    fun locate(
+        reader: DexFile,
+        profile: TokenDecryptorProfile = TokenDecryptorTargets.GALLERY,
+    ): String? {
         val tagIndex = reader.indexOfString(TokenDecryptorTargets.LOG_TAG)
         if (tagIndex < 0) return null
 

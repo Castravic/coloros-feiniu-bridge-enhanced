@@ -67,9 +67,17 @@ internal object SemanticDexResolver {
     private fun findGalleryCandidates(bridge: DexKitBridge): List<GalleryHookRefs> {
         val anchorMethods = methodsUsingString(
             bridge = bridge,
+            packagePrefix = PACKAGE_PREFIX,
             value = GALLERY_STAT_FAILURE,
             matchType = StringMatchType.StartsWith,
-        )
+        ).ifEmpty {
+            methodsUsingString(
+                bridge = bridge,
+                packagePrefix = GALLERY_PACKAGE_PREFIX,
+                value = GALLERY_STAT_FAILURE,
+                matchType = StringMatchType.StartsWith,
+            )
+        }
         val statMethods = anchorMethods.flatMap { anchor ->
             buildList {
                 if (anchor.isStatShape()) add(anchor)
@@ -184,8 +192,9 @@ internal object SemanticDexResolver {
         bridge: DexKitBridge,
         value: String,
         matchType: StringMatchType,
+        packagePrefix: String = PACKAGE_PREFIX,
     ): List<MethodData> = bridge.findMethod {
-        searchPackages(PACKAGE_PREFIX)
+        searchPackages(packagePrefix)
         matcher {
             addUsingString(value, matchType)
         }
@@ -218,8 +227,19 @@ internal object SemanticDexResolver {
         bridge: DexKitBridge,
         returnTypeName: String,
         parameterTypeNames: List<String>,
+    ): List<MethodData> {
+        val primary = findMethodsByPrototype(bridge, PACKAGE_PREFIX, returnTypeName, parameterTypeNames)
+        if (primary.isNotEmpty()) return primary
+        return findMethodsByPrototype(bridge, GALLERY_PACKAGE_PREFIX, returnTypeName, parameterTypeNames)
+    }
+
+    private fun findMethodsByPrototype(
+        bridge: DexKitBridge,
+        packagePrefix: String,
+        returnTypeName: String,
+        parameterTypeNames: List<String>,
     ): List<MethodData> = bridge.findMethod {
-        searchPackages(PACKAGE_PREFIX)
+        searchPackages(packagePrefix)
         matcher {
             returnType(returnTypeName)
             paramTypes(parameterTypeNames)
@@ -244,6 +264,7 @@ internal object SemanticDexResolver {
     )
 
     private const val PACKAGE_PREFIX = "com.oplus.aiunit.vision"
+    private const val GALLERY_PACKAGE_PREFIX = "com.oplus.gallery"
     private const val STRING_TYPE = "java.lang.String"
     private const val LIST_TYPE = "java.util.List"
     private const val INT_TYPE = "int"

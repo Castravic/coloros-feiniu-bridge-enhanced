@@ -5,6 +5,7 @@ internal data class ColdStartSyncTargets(
     val foreground: String,
     val registration: String,
     val listener: String,
+    val nativeStartMethod: String = "g",
 ) {
     companion object {
         fun forVersion(version: String?): ColdStartSyncTargets? = when (version) {
@@ -16,6 +17,11 @@ internal data class ColdStartSyncTargets(
                 "com.oplus.gallery.foundation.uikit.lifecycle.ActivityLifecycle", "c",
                 "com.oplus.gallery.foundation.uikit.lifecycle.ActivityLifecycle\$addListener\$1",
                 "com.oplus.aiunit.vision.fgq\$b",
+            )
+            "17.10.41" -> ColdStartSyncTargets(
+                "com.oplus.gallery.foundation.uikit.lifecycle.ActivityLifecycle", "c",
+                "com.oplus.gallery.foundation.uikit.lifecycle.ActivityLifecycle\$addListener\$1",
+                "com.oplus.aiunit.vision.feq\$b",
             )
             else -> null
         }
